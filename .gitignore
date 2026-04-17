@@ -1,0 +1,38 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Coverage output
+*.out
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency directory (only used if vendoring)
+vendor/
+
+# Build output
+/dist/
+/bin/
+
+# Env files
+.env
+.env.local
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Agent tooling
+.claude/
