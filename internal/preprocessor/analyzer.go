@@ -47,6 +47,13 @@ import (
 // whose successful calls the analyzer treats as fact sources.
 const proveImportPath = "github.com/GiGurra/proven/pkg/prove"
 
+// trustImportPath is the local-assertion package (pkg/trust).
+// A trust.That call does not perform a runtime check; the
+// analyzer treats it as an unconditional fact-injection on the
+// assignment's LHS, the way prove.Must is treated but without
+// the runtime side-effect.
+const trustImportPath = "github.com/GiGurra/proven/pkg/trust"
+
 // Fact asserts that predicate Pred holds on the variable named Var
 // at a given program point.
 type Fact struct {
@@ -129,6 +136,7 @@ func AnalyzeFunc(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo,
 		imports:     imports,
 		facts:       newFactSet(),
 		proveAlias:  imp.aliasFor(proveImportPath),
+		trustAlias:  imp.aliasFor(trustImportPath),
 		provenAlias: imp.provenAlias,
 	}
 	a.analyzeBlock(caller.Body)
@@ -145,6 +153,7 @@ type analyzer struct {
 	facts       *FactSet
 	out         []CallDischarge
 	proveAlias  string
+	trustAlias  string
 	provenAlias string
 }
 
@@ -619,6 +628,22 @@ func (a *analyzer) applyAssignPostconditions(s *ast.AssignStmt) {
 			}
 		}
 	}
+	// trust.That(v, preds...) — local fact injection, no runtime
+	// check. Every listed predicate becomes a fact on every LHS
+	// identifier. The absence of a runtime side-effect is the
+	// only semantic difference from prove.Must at the analyzer
+	// level; the soundness of the assertion is the user's
+	// responsibility.
+	if a.isTrustCall(call, "That") {
+		preds := a.trustCallPredicates(call)
+		for _, lhs := range s.Lhs {
+			if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+				for _, p := range preds {
+					a.facts.Add(Fact{Pred: p, Var: id.Name})
+				}
+			}
+		}
+	}
 	// prove.That(v, preds...) is intentionally NOT handled here.
 	// Its postcondition only holds on the err == nil side of
 	// the subsequent err-check guard, which spans two
@@ -653,6 +678,16 @@ func (a *analyzer) applyDeclPostconditions(vs *ast.ValueSpec) {
 	}
 	if a.isProveCall(call, "Must") {
 		preds := a.proveCallPredicates(call)
+		for _, name := range vs.Names {
+			if name.Name != "_" {
+				for _, p := range preds {
+					a.facts.Add(Fact{Pred: p, Var: name.Name})
+				}
+			}
+		}
+	}
+	if a.isTrustCall(call, "That") {
+		preds := a.trustCallPredicates(call)
 		for _, name := range vs.Names {
 			if name.Name != "_" {
 				for _, p := range preds {
@@ -871,6 +906,38 @@ func (a *analyzer) isProveCall(call *ast.CallExpr, which string) bool {
 // cannot be resolved to a Predicate are skipped, matching the
 // scanner's policy.
 func (a *analyzer) proveCallPredicates(call *ast.CallExpr) []Predicate {
+	return a.resolveTrailingPredicates(call)
+}
+
+// isTrustCall reports whether call is `<trustAlias>.<which>(...)`.
+// Mirrors isProveCall for the parallel trust package.
+func (a *analyzer) isTrustCall(call *ast.CallExpr, which string) bool {
+	if a.trustAlias == "" {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	x, ok := sel.X.(*ast.Ident)
+	if !ok || x.Name != a.trustAlias {
+		return false
+	}
+	return sel.Sel.Name == which
+}
+
+// trustCallPredicates returns the predicates passed after the
+// value argument to a trust.That call. Unresolvable predicate
+// args are skipped, matching the scanner's policy.
+func (a *analyzer) trustCallPredicates(call *ast.CallExpr) []Predicate {
+	return a.resolveTrailingPredicates(call)
+}
+
+// resolveTrailingPredicates is the common body behind
+// proveCallPredicates and trustCallPredicates: both `pkg.That(v,
+// preds...)` shapes take the value as the first argument and
+// predicates as every subsequent argument.
+func (a *analyzer) resolveTrailingPredicates(call *ast.CallExpr) []Predicate {
 	if len(call.Args) < 2 {
 		return nil
 	}

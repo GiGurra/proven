@@ -53,7 +53,8 @@ import (
 // rewriteSource — the rewriter makes no attempt to verify that
 // condition and will happily erase an unproven proven.That.
 func rewriteSource(path string, f *ast.File, fset *token.FileSet, imp *importInfo) ([]byte, bool, error) {
-	if imp.provenAlias == "" {
+	trustAlias := imp.aliasFor(trustImportPath)
+	if imp.provenAlias == "" && trustAlias == "" {
 		return nil, false, nil
 	}
 	raw, err := os.ReadFile(path)
@@ -61,36 +62,47 @@ func rewriteSource(path string, f *ast.File, fset *token.FileSet, imp *importInf
 		return nil, false, err
 	}
 
-	edits := collectRewrites(f, fset, imp.provenAlias)
+	edits := collectRewrites(f, fset, imp.provenAlias, trustAlias)
 	if len(edits) == 0 {
 		return nil, false, nil
 	}
 	applyRewrites(raw, edits)
 
-	// Every proven.That / proven.Returns use in the file has just
-	// been blanked; if those were the only references to the
-	// proven package, the compile would reject "imported and not
-	// used". An appended sentinel on a brand-new line anchors the
-	// import without perturbing the earlier line numbering — any
-	// error the compile emits at the real-code lines maps back to
-	// the user's source column-for-column.
-	raw = appendImportSentinel(raw, imp.provenAlias)
+	// Every proven.That / proven.Returns / trust.That use in the
+	// file has just been blanked; if those were the only
+	// references to the respective package, the compile would
+	// reject "imported and not used". Appended sentinels on a
+	// brand-new line at the end of the file anchor the imports
+	// without perturbing the earlier line numbering — any error
+	// the compile emits at the real-code lines maps back to the
+	// user's source column-for-column.
+	if imp.provenAlias != "" {
+		raw = appendImportSentinel(raw, imp.provenAlias+".PredicateName")
+	}
+	if trustAlias != "" {
+		// trust.That is generic, so the bare symbol cannot be
+		// referenced without instantiation. struct{} is the
+		// cheapest zero-sized type parameter that always satisfies
+		// the `any` constraint.
+		raw = appendImportSentinel(raw, trustAlias+".That[struct{}]")
+	}
 	return raw, true, nil
 }
 
-// appendImportSentinel appends a blank-identifier reference to
-// proven so the import stays in use even when every proven.That /
-// proven.Returns has been erased. proven.PredicateName is
-// exported, non-generic, has no side effects, and costs nothing
-// at runtime — taking its address does not invoke it — so this is
-// the cheapest durable anchor available in pkg/proven.
-func appendImportSentinel(raw []byte, provenAlias string) []byte {
+// appendImportSentinel appends `var _ = <rhs>` on a fresh line
+// so the import stays in use even when every call was erased.
+// Callers choose rhs so that non-generic symbols can be
+// referenced bare (`alias.Name`) while generics require an
+// explicit type instantiation (`alias.Name[struct{}]`); both are
+// side-effect-free at runtime because the program only takes the
+// value, never calls it.
+func appendImportSentinel(raw []byte, rhs string) []byte {
 	// Trailing newline is not guaranteed on user sources; add one
 	// before the sentinel to keep the result well-formed.
 	if len(raw) > 0 && raw[len(raw)-1] != '\n' {
 		raw = append(raw, '\n')
 	}
-	raw = append(raw, []byte("var _ = "+provenAlias+".PredicateName\n")...)
+	raw = append(raw, []byte("var _ = "+rhs+"\n")...)
 	return raw
 }
 
@@ -105,10 +117,21 @@ type rewriteEdit struct {
 }
 
 // collectRewrites walks f and returns a list of rewriteEdit
-// entries for every proven.That / proven.Returns call. Ordering
-// (innermost first) is enforced by applyRewrites at apply time;
-// collection here is top-down so nested calls are all captured.
-func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias string) []rewriteEdit {
+// entries for every call the rewriter erases:
+//
+//   - proven.That(...) used as a statement — whole ExprStmt
+//     blanked.
+//   - proven.Returns(v, ...) used as an expression — wrapper
+//     blanked, v's bytes preserved at their original column.
+//   - trust.That(v, ...) — same expression-level erasure as
+//     proven.Returns.
+//
+// Ordering (innermost first) is enforced by applyRewrites at
+// apply time; collection here is top-down so nested calls are
+// all captured. An empty alias ("" for a package not imported
+// by the file) makes the corresponding branch a no-op via
+// isSel's alias check.
+func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias, trustAlias string) []rewriteEdit {
 	var edits []rewriteEdit
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -117,7 +140,7 @@ func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias string) []rew
 			if !ok {
 				return true
 			}
-			if !isProvenSel(call, provenAlias, "That") {
+			if !isSel(call, provenAlias, "That") {
 				return true
 			}
 			start := fset.Position(node.Pos()).Offset
@@ -133,7 +156,10 @@ func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias string) []rew
 			// Descending costs nothing and keeps behavior simple.
 			return true
 		case *ast.CallExpr:
-			if !isProvenSel(node, provenAlias, "Returns") {
+			switch {
+			case isSel(node, provenAlias, "Returns"):
+			case isSel(node, trustAlias, "That"):
+			default:
 				return true
 			}
 			if len(node.Args) == 0 {
@@ -201,14 +227,20 @@ func blankRange(raw []byte, start, end int) {
 	}
 }
 
-// isProvenSel reports whether call is a `<provenAlias>.<name>` call.
-func isProvenSel(call *ast.CallExpr, provenAlias, name string) bool {
+// isSel reports whether call is an `<alias>.<name>` selector
+// call. An empty alias never matches, so callers can pass the
+// aliases for packages the file does not import and the
+// corresponding rewrite branch silently skips.
+func isSel(call *ast.CallExpr, alias, name string) bool {
+	if alias == "" {
+		return false
+	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return false
 	}
 	x, ok := sel.X.(*ast.Ident)
-	if !ok || x.Name != provenAlias {
+	if !ok || x.Name != alias {
 		return false
 	}
 	return sel.Sel.Name == name

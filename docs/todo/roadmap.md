@@ -25,15 +25,69 @@ This is the resume-point for preprocessor work: what's done, what's next, and wh
 
 Roughly sequential — each phase relies on the previous — but the harness tolerates incremental progress: add a fixture for a behavior, go red, implement until it's green.
 
-### Phase 7 — `proven.Trust` boundary guard
+### Phase 7 — `pkg/trust` local fact injection
 
-**Goal.** Opt-in runtime check that establishes a proven fact downstream, for boundaries where static proof is impossible but `prove.That`'s error-return shape isn't wanted.
+**Goal.** Establish a compile-time proven fact on a value without any runtime verification. The programmer takes responsibility: used when the value has been validated through some other mechanism the preprocessor cannot see (external schema validator, prior business logic, type-state invariant), and a redundant runtime check would add cost for no safety gain.
 
-- Add `func Trust[T any](v T, preds ...func(T) bool) T` in `pkg/proven`.
-- Preprocessor emits a runtime check at `Trust` call sites (panic on violation).
-- Propagate the Trust result as a discharged-fact in Phase 3.
+A new sibling package `pkg/trust`, parallel to `pkg/prove`. The call-site naming symmetry makes the mechanism obvious at the point of use:
 
-**Fixtures.** `trust_boundary_ok`, `trust_violation_panics_at_runtime`.
+- `prove.That(v, preds...) (T, error)` — runtime check, error return.
+- `prove.Must(v, preds...) T` — runtime check, panic on fail.
+- `trust.That(v, preds...) T` — **no runtime check**; asserts the facts and propagates them downstream.
+
+Shape:
+
+- New `pkg/trust/trust.go` exposing `func That[T any](v T, preds ...func(T) bool) T`. The Go body just returns `v` — no `atCompileTime` wrapper, no predicate iteration. A program that uses only `trust.That` (no `proven.That` / `proven.Returns`) links without the preprocessor and produces a no-op pass-through; mis-uses are a programmer responsibility rather than a build-time failure.
+- Analyzer treats `x := trust.That(raw, preds...)` as a fact injection: each listed predicate becomes a `Fact{Pred, Var: x}` in the caller's flow state, exactly parallel to how `prove.Must` is handled today but without the runtime side-effect. Inline use (`target(trust.That(raw, pred))` without an intervening assignment) is v2 scope, matching `proven.Returns`' and `prove.Must`'s current limitation.
+- Rewriter erases `trust.That(v, preds...)` calls the same way it erases `proven.Returns(v, preds...)`: blank the wrapper, keep `v`'s bytes at their original column.
+
+Distinction from `proven.Returns`:
+
+- `Returns` lives inside a return statement and advertises a function-level postcondition via the package's `FuncSummary`, visible to every caller across packages via the Phase 6 sidecar.
+- `trust.That` is local — it injects facts into the enclosing function's flow state, invisible to other functions or packages. If you want every caller to see the fact, use `Returns`.
+
+**Fixtures.** `trust_local_discharge_ok` (trust.That establishes a predicate on a local variable, downstream target discharges, build succeeds), `trust_mismatched_predicate_fails` (trust.That asserts predicate P, target requires a different predicate Q, build fails with undischarged diagnostic).
+
+### Phase 7.5 — Relational predicates (between-values)
+
+**Goal.** Express and discharge obligations that relate *two or more* values rather than constrain one. The v1 predicate shape `func(T) bool` is strictly unary; domains like authorization, resource lifetimes, and protocol state frequently need "this operation on Executor `e` is only permitted when Controller `c` has authorized it" — a fact over the pair `(c, e)`, not over either alone.
+
+Shape to work out (intentionally open — the sharp decisions emerge when we build a real example):
+
+- **Predicate type.** A relational predicate would look like `func(T1, T2) bool` (or variadic). The scanner and analyzer both currently assume one subject per `Fact` (`Fact{Pred, Var}`). Extension: `Fact` becomes `Fact{Pred, Vars []string}`, indexed by subject position; direct equality still works on `(Pred, Vars)` tuples.
+- **Obligation shape.** `proven.That` today wraps a single parameter. For relations we need something like `proven.Relation(pred, a, b)` or multi-argument `proven.That((a, b), pred)` — syntax TBD. The principle: declare which parameters (or returned values) participate, and which relational predicate constrains them.
+- **Fact establishment.** A relational fact appears when a guard proves the relation on specific identifiers (`if permitsAccess(c, e) { ... }`), when a relational inference rule fires, or when a `trust.That`-style injection asserts it. The analyzer's guard walker must learn to capture multi-argument predicate calls.
+- **Inference.** `infer.From(...).To(...)` today relates two unary predicates. Relational rules could be `infer.Relation(fromRel).To(toRel)` or reuse `From`/`To` with a relational `Rule` constraint type. Backward-chaining still works; the visited set just keys on `(Predicate, Vars)` pairs.
+
+Example the phase should close:
+
+```go
+func Authorize(c Controller, e Executor) {
+    proven.Relation(permitsAccess, c, e)
+}
+
+func Execute(c Controller, e Executor) {
+    proven.Relation(permitsAccess, c, e)
+    e.Run()
+}
+
+func handler(c Controller, e Executor) {
+    if permitsAccess(c, e) {
+        Authorize(c, e) // discharged
+        Execute(c, e)   // discharged
+    }
+}
+```
+
+**Open design decisions before implementing.**
+
+- Variadic arity or fixed-2? Fixed-2 covers the motivating use cases; variadic is more general but expands the analyzer's state space.
+- How to name the surface API without colliding with existing `proven.That`. Options: `proven.Relation`, overloaded `proven.That((a, b), p)` (requires tuple-pack syntax), or a separate package `pkg/relate`.
+- Whether relational predicates can be mixed with unary ones in the same `infer` rule (likely yes; the analyzer needs to know how many subjects each rule side carries).
+
+**Fixtures.** `relation_guard_discharges_ok`, `relation_inference_ok`, `relation_unguarded_fails`, `relation_wrong_pair_fails`.
+
+**Start after.** Phase 7 lands. Relational predicates are purely additive — they don't change Phases 1–6 — but they touch every scanner/analyzer invariant that currently assumes unary predicates, so doing them under a solid single-subject baseline keeps the change surface clean.
 
 ### Phase 8 — `infertest.Verify`
 
