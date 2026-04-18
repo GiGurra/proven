@@ -1,79 +1,85 @@
-// Package proven provides compile-time proven constraints for Go values.
-//
-// The types and functions in this package are lightweight runtime stubs.
-// The real work happens in the proven -toolexec preprocessor, which scans
-// call sites, discharges obligations statically, and either rewrites guards
-// or rejects the build.
-//
-// Without the preprocessor, Attest and TrustMe behave identically: they
-// wrap a T in Refined[P, T] without checking P. This lets code compile
-// and run for development and non-proven paths. Turn the preprocessor on
-// by setting GOFLAGS="-toolexec=proven" to get real guarantees.
-//
-// Two syntactic styles are supported; see docs/parameter-constraint-syntax.md
-// for the full discussion:
-//
-//   (A) Refined[P, T] — a generic wrapper carrying the proof in its type
-//       parameter. Use for primitives and ad-hoc constraints.
-//
-//   (C) Struct embedding — predicate types are zero-size structs; domain
-//       types embed them alongside the underlying value(s). Use for
-//       domain entities where a struct already exists.
-//
-// Both styles share the same predicate vocabulary: a predicate is a
-// zero-size struct type, optionally implementing Predicate[T] for the
-// runtime-guard fallback.
 package proven
 
-// Refined is a T for which predicate P has been established.
+import _ "unsafe" // for //go:linkname
+
+// atCompileTime marks a block that the proven preprocessor discharges
+// statically at every call site of the enclosing function. Under the
+// preprocessor, each such call site either compiles (with the
+// atCompileTime call erased) or fails the build with a diagnostic
+// naming the unproven predicate.
 //
-// P is a phantom type parameter; its identity alone carries the proof.
-// Two Refined values with different predicate types are distinct types
-// even though they share the same runtime representation.
-type Refined[P, T any] struct {
-	v T
+// Intentionally declared without a Go body: the symbol is supplied by
+// the proven preprocessor during the toolexec pass. Without the
+// preprocessor, the link step fails with "undefined: _proven_atCompileTime".
+//
+// Consequence: type-checking is always green (`gopls`, `go vet`, IDEs
+// see ordinary Go), but any attempt to actually build a runnable or
+// test binary without the preprocessor refuses to link. Nothing inside
+// an atCompileTime block ever executes at runtime — the preprocessor
+// consumes it, or the link fails.
+//
+//go:linkname atCompileTime _proven_atCompileTime
+func atCompileTime(_ func())
+
+// That declares a parameter precondition. Pass the parameter value and
+// one or more predicate functions; every predicate must hold. Multiple
+// predicates are AND-composed.
+//
+// Under the preprocessor, every call site of the enclosing function
+// must prove each predicate for the corresponding argument; the That
+// call is then erased. Unprovable call sites fail the build.
+//
+// The block passed to atCompileTime describes, in plain Go, what the
+// preprocessor must verify: for each predicate, pred(v) must hold. The
+// block is never executed at runtime.
+func That[T any](v T, preds ...func(T) bool) {
+	atCompileTime(func() {
+		for _, pred := range preds {
+			_ = pred(v) // each predicate must hold on v
+		}
+	})
 }
 
-// Unwrap returns the underlying value. Once unwrapped, the proof is gone:
-// the raw T must be re-attested before flowing back into a refined position.
-func (r Refined[P, T]) Unwrap() T { return r.v }
-
-// Attest asserts that x satisfies predicate P. Under the proven
-// preprocessor, the assertion must be statically discharged; if the
-// checker cannot prove P(x) from the surrounding facts, the build fails.
-//
-// Without the preprocessor, Attest is a no-op wrap.
-func Attest[P, T any](x T) Refined[P, T] {
-	return Refined[P, T]{v: x}
+// Returns declares a postcondition on the enclosing function's return
+// value. Returns the value unchanged. Callers receive the fact that
+// every predicate holds on the returned value, available to the
+// preprocessor for discharging downstream obligations without re-proof.
+func Returns[T any](v T, preds ...func(T) bool) T {
+	atCompileTime(func() {
+		for _, pred := range preds {
+			_ = pred(v) // each predicate must hold on the returned v
+		}
+	})
+	return v
 }
 
-// TrustMe wraps x in Refined[P, T] with an injected runtime check.
-// Use TrustMe at boundaries (deserialization, HTTP handlers, CLI argument
-// parsing) where static proof is not possible.
-//
-// Under the preprocessor, a call to TrustMe is rewritten to:
-//
-//	if !P.Check(x) { panic("proven: failed P") }
-//	Refined[P, T]{v: x}
-//
-// Without the preprocessor, TrustMe is a no-op wrap — the check does not
-// happen. Production builds must run with the preprocessor enabled.
-func TrustMe[P, T any](x T) Refined[P, T] {
-	return Refined[P, T]{v: x}
+// All composes predicates into a single predicate that holds when every
+// operand holds.
+func All[T any](preds ...func(T) bool) func(T) bool {
+	return func(v T) bool {
+		for _, p := range preds {
+			if !p(v) {
+				return false
+			}
+		}
+		return true
+	}
 }
 
-// Const marks x as a compile-time constant expression. Under the
-// preprocessor, x is evaluated during the toolexec pass and substituted
-// with its literal value. Without the preprocessor, Const is the identity
-// function — the expression is evaluated at runtime.
-//
-// Const only works on pure expressions: pure functions, literal inputs,
-// no I/O. The preprocessor verifies purity and fails the build otherwise.
-func Const[T any](x T) T { return x }
+// Any composes predicates into a single predicate that holds when at
+// least one operand holds.
+func Any[T any](preds ...func(T) bool) func(T) bool {
+	return func(v T) bool {
+		for _, p := range preds {
+			if p(v) {
+				return true
+			}
+		}
+		return false
+	}
+}
 
-// Predicate is an optional interface for predicates that support runtime
-// evaluation. The preprocessor's static checker does not require predicates
-// to implement this interface; TrustMe does, for the runtime guard path.
-type Predicate[T any] interface {
-	Check(T) bool
+// Not inverts a predicate.
+func Not[T any](p func(T) bool) func(T) bool {
+	return func(v T) bool { return !p(v) }
 }

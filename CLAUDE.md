@@ -2,59 +2,42 @@
 
 ## Project overview
 
-`proven` is a compile-time constraint checker for Go, delivered as a `-toolexec` preprocessor. It lets users attach refinement-type-style constraints (`Positive`, `NonEmpty`, predicate-carrying wrapper types) to values, proves them statically where possible, and injects runtime guards at explicit boundaries where it can't.
+`proven` is a compile-time contract system for Go, delivered as a `-toolexec` preprocessor. Functions declare preconditions and postconditions as ordinary runtime assertions inside the body (`proven.That`, `proven.Returns`). The preprocessor discharges these statically at each call site via flow-sensitive analysis; discharged calls are erased to zero runtime cost, undischarged calls fail the build.
 
-**Authoritative current design:** [`docs/design.md`](docs/design.md) — interface-based proof signatures plus struct-embedded proof markers. Read this first.
+**Linker gate via `atCompileTime`.** `proven.That` / `Returns` wrap their checks in a package-private `atCompileTime(func(){ ... })` helper. `atCompileTime` is declared via `//go:linkname` to an external symbol `_proven_atCompileTime` with no Go body. `gopls` and `go vet` see ordinary Go — IDE experience is always green. But `go build` / `go test` of any main or test target refuses to link without the preprocessor (which supplies the missing symbol during the toolexec pass). This is deliberate: forgetting the preprocessor is a loud link failure, never a silent loss of static checking.
 
-Background reading (historical / superseded, kept for context):
+**Repo-local test stub.** `example/basic/linkstub_test.go` provides the `_proven_atCompileTime` symbol for this repo's own tests only, via a `*_test.go` file (so it is *not* linked into production builds). Downstream users adopting proven before the preprocessor ships would need an equivalent stub in their own test trees; production code always requires the preprocessor.
 
-- [`docs/concept.md`](docs/concept.md) — the original idea: a toolexec preprocessor that adds refinement-type-style constraints to Go. Motivation and preprocessor architecture still apply.
-- [`docs/parameter-constraint-syntax.md`](docs/parameter-constraint-syntax.md) — the A+C decision that was subsequently overturned, with the analysis of alternatives that led there.
-- [`docs/subsumption.md`](docs/subsumption.md) — proof-expression subsumption algebra for the `Refined[P, T]` path. Not used by the current design (Go's structural typing handles subsumption).
-- [`docs/ide-integration.md`](docs/ide-integration.md) — analysis of the IDE friction created by `Refined[P, T]`, which drove the pivot to interface-based signatures.
+## Authoritative docs
 
-**Experiments to consult before reopening settled questions:**
+- [`docs/design.md`](docs/design.md) — the current authoritative design. Read this first.
+- [`docs/companion-packages.md`](docs/companion-packages.md) — the three-package vision: `proven` (compile-time contracts), `prove` (runtime boundary validation), `infer` (compile-time evaluation / comptime). Only `proven` is currently implemented.
+- [`docs/concept.md`](docs/concept.md) — original motivation. API names in it are partially out of date (see design.md / companion-packages.md for the current shape) but the preprocessor architecture and motivation still apply.
 
-- `internal/inferenceexperiment/` — regression test showing Go 1.26 cannot infer phantom type parameters from call-site context. This is why `proven.In(x)`-style APIs were rejected.
-- `internal/embeddingexperiment/` — regression test showing the (C) struct-embedding patterns and the four subset-validation approaches (explicit narrowing, helper method, generic constraint, interface value) all compile cleanly.
+## Background reading (historical / superseded)
 
-## Status
+Earlier designs. Do not build on these; kept to explain why the current shape is what it is.
 
-Pre-alpha. Repo currently contains only design docs and this file. No Go module, no binary, no checker.
+- [`docs/parameter-constraint-syntax.md`](docs/parameter-constraint-syntax.md) — the A+C decision (generic wrapper + struct embedding) that was later overturned.
+- [`docs/subsumption.md`](docs/subsumption.md) — proof-expression subsumption algebra required by the `Refined[P, T]` design. Not relevant to the current design; the assertion-based approach has no subsumption.
+- [`docs/ide-integration.md`](docs/ide-integration.md) — the IDE friction analysis that drove the pivot away from type-level proof representations.
 
-The first slice to build (see concept.md "Minimum viable slice") is:
+## Experiments to consult before reopening settled questions
 
-1. `pkg/proven/` — public API (`Refined[P, T]`, `Attest[P]`, `TrustMe[P]`, `Const`).
-2. `cmd/proven/` — toolexec binary following the dispatcher pattern from `rewire` (detect toolexec mode vs CLI mode by first-arg shape).
-3. `internal/scanner/` — per-package scan for `proven.*` references.
-4. `internal/checker/` — trivial proof engine (literal vs. predicate) for the first slice.
-5. `internal/rewriter/` — guard injection for `TrustMe`.
-6. `example/` — one end-to-end module demonstrating `Positive`.
+- `internal/inferenceexperiment/` — regression probe showing Go 1.26 cannot infer phantom type parameters from call-site context. Why `Refined[P, T]`-style APIs were rejected.
+- `internal/embeddingexperiment/` — regression probe for the struct-embedding (C) design. Viable but heavyweight.
+- `internal/aliasexperiment/` — regression probe for generic type aliases. Go rejects a type parameter as the RHS of an alias or named type; only non-generic per-combination aliases (`type PositiveInt = int`) work.
+- `internal/manualexperiment/` — user probe confirming the generic-alias rejection.
 
-## Related repos
+## Current implementation state
 
-- **`~/git/rewire`** — the toolexec pipeline this project reuses. Its `internal/toolexec/`, `internal/rewriter/`, and `cmd/rewire/main.go` are the reference for scanning, rewriting, and the tool-mode dispatch. When adding anything toolexec-shaped here, check how `rewire` did it first.
-- **`~/git/fl`** — the earlier thought experiment on refinement types and comptime. The design ideas motivated this project; its implementation did not (fl has no compiler).
+- `pkg/proven/` — runtime stubs: `That`, `Returns`, `All`, `Any`, `Not`.
+- `example/basic/` — end-to-end usage sketch: plain-Go signatures with `proven.That` preconditions, `proven.Returns` postconditions, caller-side discharge via preceding guards.
+- Preprocessor: not started. Will follow the `rewire` shape (toolexec entry, per-package AST scan, rewrite). Flow-sensitive analysis is the new component.
 
 ## Conventions
 
-- CLI uses `github.com/GiGurra/boa` (same as `rewire`).
-- AST rewriting generates replacement code as text via `fmt.Sprintf` + `go/parser`, not manual AST node construction. (Same as `rewire`.)
-- Test files (`_test.go`) are not rewritten unless they explicitly opt in — `proven` operates on production code.
-- Keep the public API surface small. Refined types, attestation, trust-me, const. No convenience wrappers until the core works.
-
-## Design principles
-
-- **Fail the build, don't warn.** If the checker can't prove an obligation and the user didn't use `TrustMe`, it is a compile error.
-- **Zero runtime cost on the proven path.** `Refined[P, T]` must compile to nothing when the proof succeeds. Any runtime overhead belongs at boundaries.
-- **One import.** Users add `proven` to one place and turn it on via `GOFLAGS`. No `go:generate`, no committed generated files unless genuinely unavoidable.
-- **Go-idiomatic errors.** When the checker rejects a build, the error message must point at the call site, name the obligation, and suggest the minimal fix (precondition, `Attest`, or `TrustMe`).
-
-## Open design questions
-
-Do not resolve these silently — surface them when the work touches them:
-
-- SMT backend choice (Z3 vs. pure-Go solver for the common subset).
-- Cross-package constraint propagation (sidecar summary files vs. same-package restriction).
-- Generic constraints on type parameters (explicitly deferred past v1).
-- Language-server integration for predicate doc comments (deferred past v1).
+- Predicates are ordinary `func(T) bool`. No marker methods, no wrapper types, no struct embedding.
+- Multiple predicates in a `That` / `Returns` call are AND-composed (variadic). For OR or first-class predicate values, use `All` / `Any` / `Not`.
+- Runtime behavior of `That` / `Returns` without the preprocessor is a hard requirement, not a debug convenience — it's the safety net when the preprocessor is misconfigured or absent.
+- The preprocessor's job is narrow: scan bodies for `That` / `Returns`, build per-function obligation summaries, discharge them at call sites via flow analysis, erase on success, fail on unproven. No type-level algebra.

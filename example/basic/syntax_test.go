@@ -6,175 +6,75 @@ import (
 	"github.com/GiGurra/proven/pkg/proven"
 )
 
-// These tests demonstrate how call sites look under the proven preprocessor.
-// Without the preprocessor, Attest and TrustMe are no-op wraps, so every
-// scenario below compiles and runs. Under the preprocessor:
-//
-//   - The scenarios marked "accepted" compile. No runtime checks are emitted
-//     for proofs that discharged statically.
-//   - The scenarios in the REJECTED block (commented out) would fail the
-//     build with a diagnostic pointing at the unproven obligation.
-//   - TrustMe scenarios compile and inject a runtime guard that panics on
-//     violation. Use at boundaries.
+// Scenarios showing how call sites look. Under the preprocessor,
+// provable calls compile and the proven.That / proven.Returns checks
+// are erased. Without the preprocessor, the calls run as plain runtime
+// checks — bad inputs panic.
 
-// ---------------------------------------------------------------------------
-// (A) Refined[P, T] style — call-site scenarios
-// ---------------------------------------------------------------------------
-
-// Accepted: every argument is a literal the checker can discharge trivially.
-func TestA_LiteralsProvenStatically(t *testing.T) {
-	_ = Transfer(
-		proven.Attest[Positive](100),
-		proven.Attest[proven.And[NonEmpty, MaxLen280]]("hello"),
-		proven.Attest[ValidCurrency]("USD"),
-	)
+// 1. Literal arguments — preprocessor discharges every predicate from
+// the constant. The runtime check also passes.
+func TestLiteralsAccepted(t *testing.T) {
+	if err := Transfer(100, "hello", "USD"); err != nil {
+		t.Fatal(err)
+	}
+	SetPercent(50)
 }
 
-// Accepted: the result of FindUserID is already Refined[Positive, int], so
-// the proof flows through the call chain without re-attestation.
-func TestA_ProofFlowsThroughReturnValue(t *testing.T) {
+// 2. Proof flows through a Returns-declared postcondition. A function
+// returning FindUserID() carries the fact isPositive(result) into the
+// next call site.
+func TestProofFlowsThroughReturnValue(t *testing.T) {
 	id := FindUserID("alice")
-	usePositiveInt(id)
+	usePositive(id)
 }
 
-func usePositiveInt(_ proven.Refined[Positive, int]) {}
+func usePositive(x int) {
+	proven.That(x, isPositive)
+	_ = x
+}
 
-// Accepted: flow-sensitive analysis discharges each obligation from the
-// preceding conditional.
-func TestA_ProofFromPrecedingCheck(t *testing.T) {
+// 3. Preceding predicate checks establish facts the preprocessor uses
+// to discharge the callee's preconditions. Runtime checks still run
+// but are redundant under this flow.
+func TestProofFromPrecedingCheck(t *testing.T) {
 	amount := externalInt()
 	note := externalString()
 	currency := externalString()
 
-	if amount > 0 && len(note) > 0 && len(note) <= 280 && isAllowedCurrency(currency) {
-		_ = Transfer(
-			proven.Attest[Positive](amount),
-			proven.Attest[proven.And[NonEmpty, MaxLen280]](note),
-			proven.Attest[ValidCurrency](currency),
-		)
+	if isPositive(amount) && isNonEmpty(note) && maxLen280(note) && validCurrency(currency) {
+		_ = Transfer(amount, note, currency)
 	}
 }
 
-// Accepted: TrustMe injects a runtime check at the boundary. Appropriate
-// when the data came from outside the program and no static proof is
-// possible (HTTP body, CLI args, environment variables, DB rows).
-func TestA_TrustMeAtBoundary(t *testing.T) {
-	amount := externalInt()
-	note := externalString()
-	currency := externalString()
-
-	_ = Transfer(
-		proven.TrustMe[Positive](amount),
-		proven.TrustMe[proven.And[NonEmpty, MaxLen280]](note),
-		proven.TrustMe[ValidCurrency](currency),
-	)
-}
-
-// Accepted: a user-defined compound predicate avoids visible combinators.
-func TestA_UserDefinedCompoundPredicate(t *testing.T) {
-	SetPercent(proven.Attest[SmallPositive](42))
-}
-
-// REJECTED under the preprocessor (commented so the file still compiles).
-//
-//	func TestA_UnprovenRejected(t *testing.T) {
-//	    amount := externalInt() // no preceding range check
-//	    _ = Transfer(
-//	        proven.Attest[Positive](amount), // BUILD ERROR: cannot prove Positive(amount)
-//	        proven.Attest[proven.And[NonEmpty, MaxLen280]]("ok"),
-//	        proven.Attest[ValidCurrency]("USD"),
-//	    )
-//	}
-//
-//	func TestA_PartialProofRejected(t *testing.T) {
-//	    note := externalString()
-//	    if len(note) > 0 {
-//	        // NonEmpty discharges from the if-check; MaxLen280 does not.
-//	        _ = Transfer(
-//	            proven.Attest[Positive](1),
-//	            proven.Attest[proven.And[NonEmpty, MaxLen280]](note), // BUILD ERROR: MaxLen280
-//	            proven.Attest[ValidCurrency]("USD"),
-//	        )
-//	    }
-//	}
-
-// ---------------------------------------------------------------------------
-// (C) Struct embedding style — call-site scenarios
-// ---------------------------------------------------------------------------
-
-// Accepted: every field is a literal the checker discharges trivially.
-// The embedded Positive / NonEmpty / MaxLen280 / ValidCurrency fields are
-// zero-size proof markers; the checker verifies each obligation for the
-// accompanying value field(s).
-func TestC_DomainLiteralsProvenStatically(t *testing.T) {
-	_ = TransferDomain(
-		UserID{V: 1},
-		UserID{V: 2},
-		Amount{V: 100, Curr: Currency{S: "USD"}},
-		Note{S: "hello"},
-	)
-}
-
-// Accepted: the proof rides inside the struct. Passing a UserID around
-// does not erase its proof — unlike Refined, there is no .Unwrap() call
-// that strips it.
-func TestC_ProofRidesInsideStruct(t *testing.T) {
-	alice := lookupUser("alice") // returns UserID with proof baked in
-	bob := lookupUser("bob")
-	_ = TransferDomain(
-		alice, bob,
-		Amount{V: 50, Curr: Currency{S: "EUR"}},
-		Note{S: "split"},
-	)
-}
-
-func lookupUser(_ string) UserID {
-	// Under the preprocessor, the literal 1 discharges Positive.
-	return UserID{V: 1}
-}
-
-// Accepted: flow-sensitive analysis discharges obligations in struct
-// literals just as it does for Attest calls.
-func TestC_DomainProofFromPrecedingCheck(t *testing.T) {
-	amount := externalInt()
-	note := externalString()
-	currency := externalString()
-
-	if amount > 0 && len(note) > 0 && len(note) <= 280 && isAllowedCurrency(currency) {
-		_ = TransferDomain(
-			UserID{V: 1}, UserID{V: 2},
-			Amount{V: amount, Curr: Currency{S: currency}},
-			Note{S: note},
-		)
+// 4. Early-return guards narrow scope. After the returns, the
+// preprocessor treats each guarded predicate as established.
+func TestEarlyReturnGuards(t *testing.T) {
+	p := externalInt()
+	if !isPositive(p) {
+		return
 	}
+	if !lessThan100(p) {
+		return
+	}
+	SetPercent(p)
 }
 
-// REJECTED under the preprocessor (commented so the file still compiles).
+// 5. REJECTED under the preprocessor (commented so this file builds):
 //
-//	func TestC_ZeroValueRejected(t *testing.T) {
-//	    // UserID's zero value is {Positive{}, V: 0}. Positive(0) is false.
-//	    // The preprocessor rejects the declaration.
-//	    var u UserID // BUILD ERROR: cannot prove Positive(UserID.V) for zero value
-//	    _ = u
-//	}
-//
-//	func TestC_InvalidLiteralRejected(t *testing.T) {
-//	    // The checker sees V: -5 and rejects the literal.
-//	    u := UserID{V: -5} // BUILD ERROR: cannot prove Positive(-5)
-//	    _ = u
+//	func TestUnprovenRejected(t *testing.T) {
+//	    amount := externalInt() // no preceding check
+//	    _ = Transfer(amount, "hi", "USD") // preprocessor: cannot prove isPositive(amount)
 //	}
 
+// Under the new design, proven.That / proven.Returns never panic at
+// runtime — their bodies are atCompileTime blocks consumed by the
+// preprocessor. There are therefore no runtime-panic tests; the
+// preceding cases only assert that the patterns compile (which with
+// the linkstub they also run, vacuously).
+
 // ---------------------------------------------------------------------------
-// Helpers (stand-ins for external I/O)
+// Stand-ins for external input.
 // ---------------------------------------------------------------------------
 
 func externalInt() int       { return 0 }
 func externalString() string { return "" }
-
-func isAllowedCurrency(s string) bool {
-	switch s {
-	case "USD", "EUR", "GBP":
-		return true
-	}
-	return false
-}

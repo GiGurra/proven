@@ -1,5 +1,10 @@
 # proven: concept
 
+> **Note.** This document captures the original motivation and the preprocessor architecture. Some of the specific API names below (`proven.Refined[P, T]`, `proven.Const`, etc.) have been revised — the current shape is documented in [`design.md`](design.md) and the cross-package split in [`companion-packages.md`](companion-packages.md). The motivation, preprocessor rationale, and the case against alternatives remain accurate.
+
+---
+
+
 ## The problem
 
 In real Go codebases, validation is a discipline, not a guarantee. Incoming data is validated at the edge (sometimes), then flows through dozens of functions that either re-validate defensively or silently assume it's good. When the assumption is wrong — null where a value was expected, empty string where a handle was expected, negative where a count was expected — you get a runtime error, or worse, a quiet bug.
