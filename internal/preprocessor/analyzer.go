@@ -38,6 +38,7 @@ package preprocessor
 //      prove.Must produces the fact unconditionally at its call site.
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -142,7 +143,7 @@ func AnalyzeFunc(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo,
 		summary:     summary,
 		imp:         imp,
 		imports:     imports,
-		facts:       newFactSet(),
+		facts:       seedFactsFromPreconditions(caller, summary),
 		proveAlias:  imp.aliasFor(proveImportPath),
 		trustAlias:  imp.aliasFor(trustImportPath),
 		provenAlias: imp.provenAlias,
@@ -151,6 +152,88 @@ func AnalyzeFunc(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo,
 	}
 	a.analyzeBlock(caller.Body)
 	return a.out
+}
+
+// seedFactsFromPreconditions returns the initial FactSet for
+// analyzing caller's body. Each `proven.That(param, pred)` at the
+// top of caller's body — which the scanner already recorded in
+// summary.Funcs[caller.key].ParamPreds[i] — is a precondition every
+// caller has already discharged at its call site, so inside
+// caller's body the predicate holds on the corresponding parameter
+// as a starting fact. Seeding this lets two things work:
+//
+//  1. `return proven.Returns(x, pred)` validates against the
+//     function's own declared precondition on x.
+//  2. A function that declares a precondition and internally
+//     forwards the parameter to another function requiring the
+//     same precondition discharges without re-guarding.
+//
+// Functions without a summary entry (no obligations declared)
+// start with an empty fact set — no facts to seed. Parameters
+// whose declared preconditions refer to predicates the analyzer
+// cannot find are still faithfully seeded; the point is that the
+// caller has promised those predicates hold, irrespective of
+// whether the local analyzer would accept the predicate identity
+// elsewhere.
+func seedFactsFromPreconditions(caller *ast.FuncDecl, summary *PackageSummary) *FactSet {
+	facts := newFactSet()
+	if summary == nil {
+		return facts
+	}
+	key := funcDeclKey(caller)
+	fsum, ok := summary.Funcs[key]
+	if !ok || fsum == nil {
+		return facts
+	}
+	paramNames := paramNamesByIndex(caller.Type)
+	for idx, preds := range fsum.ParamPreds {
+		name, ok := paramNames[idx]
+		if !ok || name == "" || name == "_" {
+			continue
+		}
+		for _, p := range preds {
+			facts.Add(Fact{Pred: p, Var: name})
+		}
+	}
+	return facts
+}
+
+// funcDeclKey reproduces the FuncSummary.Key() computation starting
+// from a FuncDecl: "Name" for free functions, "Recv.Method" for
+// methods. Used to look up the function's own precondition record
+// in summary.Funcs when seeding the analyzer's fact set.
+func funcDeclKey(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return fn.Name.Name
+	}
+	recv := receiverTypeName(fn.Recv.List[0].Type)
+	if recv == "" {
+		return fn.Name.Name
+	}
+	return recv + "." + fn.Name.Name
+}
+
+// paramNamesByIndex maps each parameter position to its name (or
+// the empty string for unnamed / blank-identifier parameters). The
+// 0-based positions match the ones the scanner uses when populating
+// FuncSummary.ParamPreds, so the fact seeder can pair them up.
+func paramNamesByIndex(ft *ast.FuncType) map[int]string {
+	out := map[int]string{}
+	if ft == nil || ft.Params == nil {
+		return out
+	}
+	pos := 0
+	for _, field := range ft.Params.List {
+		if len(field.Names) == 0 {
+			pos++
+			continue
+		}
+		for _, n := range field.Names {
+			out[pos] = n.Name
+			pos++
+		}
+	}
+	return out
 }
 
 // analyzer owns the mutable fact set, the read-only summary/import
@@ -420,14 +503,116 @@ func blockAlwaysEscapes(block *ast.BlockStmt) bool {
 // walkCalls descends into expr looking for call expressions that
 // match summary entries, and records their discharge against the
 // current fact set. Walks nested calls (e.g. `outer(annotated(x))`)
-// so obligations on inner calls are checked.
+// so obligations on inner calls are checked. Also verifies each
+// proven.Returns call in the subtree: the value argument must be
+// an identifier with every listed predicate already established in
+// the current fact set. Unverified postconditions are a soundness
+// hole (callers get a wrong fact) and emit a strict-mode diagnostic.
 func (a *analyzer) walkCalls(expr ast.Expr) {
 	ast.Inspect(expr, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
 			a.recordCallDischarge(call)
+			a.verifyProvenReturns(call)
 		}
 		return true
 	})
+}
+
+// verifyProvenReturns checks that every predicate supplied to
+// proven.Returns is already a fact on the value argument in the
+// analyzer's current flow state. This is the verification step for
+// return-value postconditions: the scanner advertises the
+// predicates on the containing function's summary, but without this
+// check the claim would be accepted on the programmer's word rather
+// than proved. Violations emit a Go-standard diagnostic via the
+// analyzer's diags channel.
+//
+// The value argument must be a direct identifier; literals and
+// composite expressions have no fact-set identity, so we refuse
+// them explicitly. Users who want to return a literal as a
+// postcondition-bearing value should wrap with prove.Must (runtime
+// check) or trust.That (programmer vouch) first.
+func (a *analyzer) verifyProvenReturns(call *ast.CallExpr) {
+	if a.provenAlias == "" {
+		return
+	}
+	if !isSel(call, a.provenAlias, "Returns") {
+		return
+	}
+	if len(call.Args) < 2 {
+		return
+	}
+	valueID, ok := call.Args[0].(*ast.Ident)
+	if !ok {
+		reportBadReturnsValue(a.diags, a.fset, call.Args[0], "literal or expression")
+		return
+	}
+	if a.diags == nil || a.fset == nil {
+		// Lenient mode (stand-alone tests, no diagnostic sink);
+		// skip verification so existing test helpers keep working.
+		return
+	}
+	for _, arg := range call.Args[1:] {
+		pred, ok := resolvePredicate(arg, a.imp, a.summary.ImportPath)
+		if !ok {
+			// The unresolvable-predicate diagnostic is already
+			// emitted by the scanner's recordReturns pass; skip
+			// here to avoid doubling the error.
+			continue
+		}
+		if !a.discharged(pred, valueID.Name) {
+			reportUnprovenReturns(a.diags, a.fset, call, pred, valueID.Name, a.summary.ImportPath)
+		}
+	}
+}
+
+// reportBadReturnsValue emits a diagnostic when the value argument
+// of proven.Returns is not a direct identifier. This is a strict-
+// mode rejection — the analyzer needs a name to look up facts in
+// the current fact set, and literals / expressions have no such
+// identity.
+func reportBadReturnsValue(diags *[]Diagnostic, fset *token.FileSet, expr ast.Expr, kind string) {
+	if diags == nil || fset == nil {
+		return
+	}
+	pos := fset.Position(expr.Pos())
+	*diags = append(*diags, Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg: fmt.Sprintf(
+			"proven: value argument to proven.Returns must be an identifier (got %s); wrap with prove.Must or trust.That to establish the fact first",
+			kind,
+		),
+	})
+}
+
+// reportUnprovenReturns emits a diagnostic when a predicate listed
+// in proven.Returns has not been established on the value at the
+// return site. This is the verification step that closes the
+// soundness hole where proven.Returns would advertise a
+// postcondition to callers without having proved it locally.
+func reportUnprovenReturns(diags *[]Diagnostic, fset *token.FileSet, call *ast.CallExpr, pred Predicate, varName, currentPkg string) {
+	pos := fset.Position(call.Pos())
+	*diags = append(*diags, Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg: fmt.Sprintf(
+			"proven: proven.Returns predicate %s is not established on %s — add a guard (if %s(%s) { ... }), prove.Must, trust.That, or another discharge path before returning",
+			predicateLabelFor(pred, currentPkg), varName, predicateLabelFor(pred, currentPkg), varName,
+		),
+	})
+}
+
+// predicateLabelFor renders a predicate for a diagnostic: same-
+// package predicates use the bare name; cross-package ones keep a
+// short package qualifier (last path segment).
+func predicateLabelFor(p Predicate, currentPkg string) string {
+	if p.Pkg == "" || p.Pkg == currentPkg {
+		return p.Name
+	}
+	return lastPathSegment(p.Pkg) + "." + p.Name
 }
 
 // recordCallDischarge looks up the callee's summary (if any) and

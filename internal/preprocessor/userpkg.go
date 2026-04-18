@@ -112,7 +112,13 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	// a rules-only package must still write its sidecar so callers
 	// that import it pick up the implications via the Phase 6
 	// sidecar-lookup path.
-	if len(sum.Funcs) == 0 && len(sum.Rules) == 0 && len(imports) == 0 {
+	//
+	// Packages that import prove or trust also keep the analyzer
+	// running even without their own obligations: that's where the
+	// strict-mode diagnostics for loose lambdas at prove.That /
+	// prove.Must / trust.That sites fire. Short-circuiting here
+	// would silently bypass those checks.
+	if len(sum.Funcs) == 0 && len(sum.Rules) == 0 && len(imports) == 0 && !anyFileImportsProveOrTrust(files) {
 		return nil, nil
 	}
 
@@ -164,6 +170,23 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	// without rewrite targets keep their original paths in the
 	// compile argv.
 	return rewritePlan(toolArgs, sources, files, fset)
+}
+
+// anyFileImportsProveOrTrust reports whether any file in the
+// package imports the prove or trust runtime package. The analyzer
+// must run on these packages even when they have no obligations or
+// imports-with-obligations of their own: prove.That / prove.Must /
+// trust.That call sites are checked in strict mode for
+// unresolvable predicate arguments (lambdas, inline expressions),
+// and short-circuiting here would silently skip those checks.
+func anyFileImportsProveOrTrust(files []*ast.File) bool {
+	for _, f := range files {
+		imp := collectImports(f)
+		if imp.aliasFor(proveImportPath) != "" || imp.aliasFor(trustImportPath) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // parsePackageSources parses every .go file once. The returned

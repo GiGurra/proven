@@ -201,6 +201,7 @@ func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias, trustAlias s
 			switch {
 			case isSel(node, provenAlias, "Returns"):
 			case isSel(node, trustAlias, "That"):
+			case isSel(node, trustAlias, "Returns"):
 			default:
 				return true
 			}

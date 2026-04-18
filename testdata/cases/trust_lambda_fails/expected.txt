@@ -1,0 +1,1 @@
+proven: argument to trust.That must be a named function or pkg.Name selector

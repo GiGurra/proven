@@ -56,3 +56,36 @@ func That[T any](v T, preds ...func(T) bool) T {
 	_ = preds
 	return v
 }
+
+// Returns is the "trust me" variant of proven.Returns: it
+// combines trust.That's no-runtime-check honor-system semantics
+// with proven.Returns's function-level postcondition advertisement.
+// The enclosing function's callers see v as carrying every listed
+// predicate as a fact, exactly as if the function returned
+// `proven.Returns(v, preds...)` — but without the verification the
+// preprocessor applies at a proven.Returns call site.
+//
+// Use in the same situations as trust.That: the value is known
+// to satisfy the predicates through some mechanism the analyzer
+// cannot see, and a runtime re-check would duplicate earlier
+// validation. Prefer proven.Returns over a local variable plus a
+// guard whenever the analyzer can prove the value locally;
+// trust.Returns is the escape hatch for literals, computed
+// expressions, and other values the flow analyzer cannot reason
+// about but the programmer knows are sound.
+//
+// Typical shape:
+//
+//	func DefaultUserID() int {
+//	    return trust.Returns(42, isPositive) // 42 obviously > 0
+//	}
+//
+// Under the preprocessor the call is erased the same way as
+// proven.Returns and trust.That: the wrapper disappears, v
+// survives at its original column, and each predicate is added to
+// the enclosing function's ReturnPreds summary so downstream
+// callers discharge without re-proving.
+func Returns[T any](v T, preds ...func(T) bool) T {
+	_ = preds
+	return v
+}

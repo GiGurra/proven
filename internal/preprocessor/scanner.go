@@ -151,13 +151,14 @@ func ScanPackage(importPath string, sources []string) (*PackageSummary, error) {
 func scanFile(sum *PackageSummary, importPath string, fset *token.FileSet, f *ast.File, diags *[]Diagnostic) {
 	imp := collectImports(f)
 	inferAlias := imp.aliasFor(inferImportPath)
-	if imp.provenAlias == "" && inferAlias == "" {
+	trustAlias := imp.aliasFor(trustImportPath)
+	if imp.provenAlias == "" && inferAlias == "" && trustAlias == "" {
 		return
 	}
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			if d.Body == nil || imp.provenAlias == "" {
+			if d.Body == nil || (imp.provenAlias == "" && trustAlias == "") {
 				continue
 			}
 			if summary := scanFunc(d, imp, importPath, fset, diags); summary != nil {
@@ -384,20 +385,28 @@ func scanFunc(fn *ast.FuncDecl, imp *importInfo, importPath string, fset *token.
 		summary.Recv = receiverTypeName(fn.Recv.List[0].Type)
 	}
 	paramIdx := buildParamIndex(fn.Type)
+	trustAlias := imp.aliasFor(trustImportPath)
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		kind, ok := matchProvenCall(call, imp.provenAlias)
-		if !ok {
+		if kind, ok := matchProvenCall(call, imp.provenAlias); ok {
+			switch kind {
+			case "That":
+				recordThat(summary, paramIdx, call, imp, importPath, fset, diags)
+			case "Returns":
+				recordReturns(summary, call, imp, importPath, fset, diags)
+			}
 			return true
 		}
-		switch kind {
-		case "That":
-			recordThat(summary, paramIdx, call, imp, importPath, fset, diags)
-		case "Returns":
+		// trust.Returns advertises the same function-level
+		// postcondition shape as proven.Returns, just without
+		// call-site verification. Record its predicates in
+		// ReturnPreds so every caller downstream picks up the
+		// fact via the cross-package sidecar path.
+		if trustAlias != "" && isSel(call, trustAlias, "Returns") {
 			recordReturns(summary, call, imp, importPath, fset, diags)
 		}
 		return true
