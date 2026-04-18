@@ -402,7 +402,7 @@ func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
 		argName, _ := identName(call.Args[idx])
 		var missing []Predicate
 		for _, p := range required {
-			if !a.facts.Has(p, argName) {
+			if !a.discharged(p, argName) {
 				missing = append(missing, p)
 			}
 		}
@@ -421,6 +421,52 @@ func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
 		CalleeKey: key,
 		Params:    params,
 	})
+}
+
+// discharged reports whether predicate pred holds on the
+// identifier named varName, either as a direct fact or by
+// implication through the declared inference rules.
+//
+// An implication chain succeeds when a rule whose To is pred can
+// be closed: its From predicate holds on varName (possibly
+// through another chain) and, when present, its Given context
+// also holds on varName. Unknown / not-in-scope variable names
+// ("" from non-ident arguments) never discharge anything.
+//
+// Cycle-safe: a visited set collects every predicate the query
+// has already attempted to prove on this variable, so a
+// pathological A ⇒ B ⇒ A ruleset returns false without
+// recursing forever. The visited marker is per top-level query,
+// so an independent later query starts fresh.
+func (a *analyzer) discharged(pred Predicate, varName string) bool {
+	if varName == "" {
+		return false
+	}
+	return a.dischargedRec(pred, varName, make(map[Predicate]bool))
+}
+
+func (a *analyzer) dischargedRec(pred Predicate, varName string, visited map[Predicate]bool) bool {
+	if a.facts.Has(pred, varName) {
+		return true
+	}
+	if visited[pred] {
+		return false
+	}
+	visited[pred] = true
+
+	for _, rule := range a.summary.Rules {
+		if rule.To != pred {
+			continue
+		}
+		if !a.dischargedRec(rule.From, varName, visited) {
+			continue
+		}
+		if rule.Given != nil && !a.dischargedRec(*rule.Given, varName, visited) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // calleeKey returns the summary key for a call whose callee we can

@@ -30,6 +30,12 @@ import (
 // else is ordinary user code.
 const provenImportPath = "github.com/GiGurra/proven/pkg/proven"
 
+// inferImportPath is the import path of the pkg/infer package.
+// Package-scope `var _ = infer.From(p).[Given(c).]To(q)` chains
+// in files that import it are harvested as InferRule entries on
+// the PackageSummary.
+const inferImportPath = "github.com/GiGurra/proven/pkg/infer"
+
 // Predicate identifies a predicate function by its declaring
 // package and identifier name. For predicates defined in the
 // scanned package itself, Pkg is that package's own import path —
@@ -76,11 +82,27 @@ func (s *FuncSummary) Key() string {
 	return s.Recv + "." + s.Name
 }
 
+// InferRule is one declared package-scope implication rule
+// harvested from `var _ = infer.From(premise).[Given(context).]To(conclusion)`.
+// Given is non-nil only when a .Given(...) step was present.
+//
+// Rules are trusted — the scanner does not verify that the
+// implication actually holds (docs/design.md). Unresolvable
+// predicate arguments (combinator calls, function literals, etc.)
+// cause the rule to be skipped rather than silently stored with
+// an empty identity.
+type InferRule struct {
+	From  Predicate
+	Given *Predicate
+	To    Predicate
+}
+
 // PackageSummary is the scanner output for one compile unit. Only
 // functions with at least one obligation are present in Funcs.
 type PackageSummary struct {
 	ImportPath string
 	Funcs      map[string]*FuncSummary
+	Rules      []InferRule
 }
 
 // ScanPackage parses each source file and returns the obligation
@@ -108,25 +130,135 @@ func ScanPackage(importPath string, sources []string) (*PackageSummary, error) {
 	return sum, nil
 }
 
-// scanFile walks one parsed file's top-level FuncDecls, collecting
-// any obligations into sum. Files that do not import pkg/proven
-// produce no entries and are skipped early.
+// scanFile walks one parsed file's top-level declarations.
+// FuncDecls with proven.That / proven.Returns calls populate
+// sum.Funcs; package-scope `var _ = infer.From(...)` chains
+// populate sum.Rules. Files that import neither pkg/proven nor
+// pkg/infer are skipped early.
 func scanFile(sum *PackageSummary, importPath string, f *ast.File) {
 	imp := collectImports(f)
-	if imp.provenAlias == "" {
+	inferAlias := imp.aliasFor(inferImportPath)
+	if imp.provenAlias == "" && inferAlias == "" {
 		return
 	}
 	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Body == nil || imp.provenAlias == "" {
+				continue
+			}
+			if summary := scanFunc(d, imp, importPath); summary != nil {
+				sum.Funcs[summary.Key()] = summary
+			}
+		case *ast.GenDecl:
+			if d.Tok != token.VAR || inferAlias == "" {
+				continue
+			}
+			scanInferRules(sum, imp, importPath, inferAlias, d)
 		}
-		summary := scanFunc(fn, imp, importPath)
-		if summary == nil {
-			continue
-		}
-		sum.Funcs[summary.Key()] = summary
 	}
+}
+
+// scanInferRules examines each ValueSpec value in genDecl for an
+// inference-rule chain and appends any matches to sum.Rules.
+func scanInferRules(sum *PackageSummary, imp *importInfo, importPath, inferAlias string, genDecl *ast.GenDecl) {
+	for _, spec := range genDecl.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for _, val := range vs.Values {
+			if rule, ok := extractInferRule(val, inferAlias, imp, importPath); ok {
+				sum.Rules = append(sum.Rules, rule)
+			}
+		}
+	}
+}
+
+// extractInferRule matches one of the two fluent shapes:
+//
+//	infer.From(premise).To(conclusion)
+//	infer.From(premise).Given(context).To(conclusion)
+//
+// and returns the rule identity. The outermost call is always
+// `.To(conclusion)`; its receiver is either `.From(premise)`
+// directly or `.Given(context)` wrapping `.From(premise)`.
+// Unresolvable predicate arguments or any structural mismatch
+// produces (_, false) so the caller silently skips the
+// declaration — matching the scanner's policy of over-tolerance
+// for user code the preprocessor does not understand.
+func extractInferRule(expr ast.Expr, inferAlias string, imp *importInfo, importPath string) (InferRule, bool) {
+	toCall, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return InferRule{}, false
+	}
+	toSel, ok := toCall.Fun.(*ast.SelectorExpr)
+	if !ok || toSel.Sel.Name != "To" || len(toCall.Args) != 1 {
+		return InferRule{}, false
+	}
+	conclusion, ok := resolvePredicate(toCall.Args[0], imp, importPath)
+	if !ok {
+		return InferRule{}, false
+	}
+
+	inner, ok := toSel.X.(*ast.CallExpr)
+	if !ok {
+		return InferRule{}, false
+	}
+	innerSel, ok := inner.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return InferRule{}, false
+	}
+
+	switch innerSel.Sel.Name {
+	case "From":
+		// infer.From(premise).To(conclusion)
+		if !isInferIdent(innerSel.X, inferAlias) {
+			return InferRule{}, false
+		}
+		if len(inner.Args) != 1 {
+			return InferRule{}, false
+		}
+		premise, ok := resolvePredicate(inner.Args[0], imp, importPath)
+		if !ok {
+			return InferRule{}, false
+		}
+		return InferRule{From: premise, To: conclusion}, true
+
+	case "Given":
+		// infer.From(premise).Given(context).To(conclusion)
+		if len(inner.Args) != 1 {
+			return InferRule{}, false
+		}
+		given, ok := resolvePredicate(inner.Args[0], imp, importPath)
+		if !ok {
+			return InferRule{}, false
+		}
+		fromCall, ok := innerSel.X.(*ast.CallExpr)
+		if !ok {
+			return InferRule{}, false
+		}
+		fromSel, ok := fromCall.Fun.(*ast.SelectorExpr)
+		if !ok || fromSel.Sel.Name != "From" || len(fromCall.Args) != 1 {
+			return InferRule{}, false
+		}
+		if !isInferIdent(fromSel.X, inferAlias) {
+			return InferRule{}, false
+		}
+		premise, ok := resolvePredicate(fromCall.Args[0], imp, importPath)
+		if !ok {
+			return InferRule{}, false
+		}
+		return InferRule{From: premise, Given: &given, To: conclusion}, true
+	}
+	return InferRule{}, false
+}
+
+// isInferIdent reports whether expr is the identifier for the
+// import alias under which pkg/infer was imported.
+func isInferIdent(expr ast.Expr, inferAlias string) bool {
+	id, ok := expr.(*ast.Ident)
+	return ok && id.Name == inferAlias
 }
 
 // importInfo holds the alias -> import-path mapping for a single
