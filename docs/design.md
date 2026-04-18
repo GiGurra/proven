@@ -80,6 +80,28 @@ Patterns not supported in v1:
 - Proof through complex argument expressions (`That(transform(x), p)` is v2).
 - Symbolic predicate reasoning beyond declared `infer` rules (full SMT remains out of scope).
 
+## Relations between values
+
+Predicates are `func(T) bool` — strictly unary. A relation over multiple values ("controller `c` has authorized executor `e`", "session `s` is owned by user `u`") is expressed by packing the participating subjects into a domain struct and writing the predicate as unary over that struct:
+
+```go
+type AuthCtx struct {
+    S Session
+    U User
+    R Resource
+}
+
+func canModify(a AuthCtx) bool { /* ... */ }
+
+func modifyResource(a AuthCtx) {
+    proven.That(a, canModify)
+}
+```
+
+Every existing discharge pattern — guards, early-return, `proven.Returns`, `prove.That`/`Must`, `trust.That`, `infer.From/Given/To`, the cross-package sidecar, the erasure rewriter — applies to tuple subjects unchanged. No new API, no new `Fact` shape. The cost is that users must name their relations as domain types, which tends to be good design but is a new discipline.
+
+Currying (`f(s, u)(r)` as a nested unary predicate) and an explicit `proven.Relation(pred, subjects...)` API were both explored and deferred. See [`relations.md`](relations.md) for the full exploration, AST shapes for each approach, and the triggers that would reopen the decision.
+
 ## Why this design over the alternatives
 
 **Generic wrapper types (`Refined[P, T]`).** Rejected because Go 1.26 cannot infer phantom type parameters from call-site context. Users would have to write `proven.Attest[Positive](x)` at every call, plus a separate `Weaken` cast for every subsumption boundary. The IDE story was also poor — gopls flags subsumption as type errors. Captured in [`parameter-constraint-syntax.md`](parameter-constraint-syntax.md) and [`ide-integration.md`](ide-integration.md).
@@ -115,9 +137,10 @@ Mitigations:
 2. **Scan for `infer.From(...).To(...)` declarations.** Populate an implication graph: `P ⇒ Q` (optionally under context `C`).
 3. **Flow-sensitive analysis in each caller.** Collect facts from conditionals, guards, prior `Returns` postconditions, and literal evaluation. For each call to an annotated function, discharge every predicate on every corresponding argument, using implication-graph walks when a direct match fails.
 4. **Emit or fail.** When all obligations discharge, rewrite the callee's body for this build to erase the `That` / `Returns` calls. When they don't, fail the build with a diagnostic naming the unproven predicate and the call site.
-5. **`Const` evaluation (future).** `infer.Const(expr)` computes pure expressions at build time and substitutes literals. Orthogonal to the contract story, part of the same preprocessor pipeline when it lands.
 
 No marker-interface synthesis, no wrapper-type generation, no phantom-parameter tricks. The implication graph from step 2 is the only subsumption-like machinery, and it is purely structural — a set of declared-and-trusted implications, not a solver.
+
+Zig-style compile-time evaluation of pure expressions — historically lumped under this project as `infer.Const` — was explored and declared out of scope; the mechanisms and use cases share little with contract discharge, and bundling them obscures both. See [`comptime.md`](comptime.md).
 
 ## Open questions
 

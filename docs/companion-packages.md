@@ -95,37 +95,19 @@ var _ = infer.From(isSmallPositive).To(isPositive)
 var _ = infer.From(isEven).Given(isGreaterThanZero).To(isPositive)
 ```
 
-Reads left-to-right as the logical statement: *"from this premise, [given this context,] we conclude this."* Rules are **trusted** — the preprocessor does not symbolically verify that the declared implication actually holds. A future `infertest.Verify` helper would property-test rules on sample inputs to catch declared-but-false rules during development.
+Reads left-to-right as the logical statement: *"from this premise, [given this context,] we conclude this."* Rules are **trusted** — the preprocessor does not symbolically verify that the declared implication actually holds. `pkg/infertest.Verify(t, rule, samples...)` (implemented) offers a cheap property-test: it evaluates the rule's premise, Given, and conclusion on each sample and reports a failure whenever premise and Given both hold but conclusion does not. A stricter `VerifyApplies` additionally fails if no sample triggered the premise at all — useful when the caller is expected to supply a coverage-relevant sample set rather than relying on silent vacuous-truth.
 
-Implemented: `pkg/infer/infer.go` (runtime stubs).
+Implemented: `pkg/infer/infer.go` (runtime stubs); `pkg/infertest/infertest.go` (`Verify`, `VerifyApplies`).
 
-### Compile-time evaluation (`comptime`) — future
+### Compile-time evaluation — not in scope here
 
-Zig-style `comptime` for the pure subset of Go. Evaluate an expression at build time, substitute the resulting literal, omit the evaluation from the binary:
-
-```go
-var primes = infer.Const(sieve(10_000))
-```
-
-Under the preprocessor: `sieve(10_000)` runs during compilation; the result is emitted as a Go literal baked into the binary. Startup cost zero.
-
-Without the preprocessor: `infer.Const` is the identity function; the expression evaluates at package-init time.
-
-Purity is verified by the preprocessor. Impure operations (I/O, unknown functions) fail the build at the first impure operation.
-
-**Use for:** lookup tables, configuration constants derived by computation, code generation that would otherwise live in `go generate`.
-
-(The original `concept.md` placed `Const` under `proven.Const`. It relocates here; `proven` is reserved for contract-style assertions.)
-
-### Why one package
-
-Both features are "what we deduce at build time". Inference rules deduce *relationships between predicates*; `Const` deduces *values of expressions*. They share the same preprocessor pass structure and the same trust-the-declarer convention, so bundling them under `infer` keeps the mental model narrow.
+Earlier iterations of this document proposed a Zig-style `infer.Const` for evaluating pure expressions at build time. When we sat down to design it we concluded it belongs in a separate project: its mechanisms, use cases, and hard problems share almost nothing with contract-system predicates and their discharge. The full exploration — candidate execution models, real code spikes, final recommendation — lives in [`comptime.md`](comptime.md). The `infer` package in this project is specifically about predicate-implication declarations, nothing else.
 
 ## Why four packages
 
 - **Distinct intent.** `proven.That` says "caller must prove this"; `prove.That` / `prove.Must` say "this just came from outside, validate it now"; `trust.That` says "I've already validated this by other means, take my word for it"; `infer.From(p).To(q)` says "these predicates relate." Each verb carries its own semantics; conflating them behind a single API obscures which is happening.
-- **Distinct runtime semantics.** `proven.That` is erased by the preprocessor and has a no-op runtime stub; `prove.That` runs at runtime and returns an error; `prove.Must` runs at runtime and panics on failure; `trust.That` never runs any check; `infer.Const` (future) computes at build time. Five distinct call shapes behind targeted packages are cleaner than one overloaded API.
-- **Distinct preprocessor responsibilities.** The `proven` pass discharges via flow analysis; the `prove` pass injects facts at successful-check branches (runtime code is unchanged); the `trust` pass injects facts unconditionally and erases the call; the `infer` pass consumes declared rules for backward-chaining (and, future, evaluates `Const`). Four passes, each focused.
+- **Distinct runtime semantics.** `proven.That` is erased by the preprocessor and has a no-op runtime stub; `prove.That` runs at runtime and returns an error; `prove.Must` runs at runtime and panics on failure; `trust.That` never runs any check; `infer.From(p).To(q)` is consumed by the preprocessor as a declaration with no runtime behavior beyond holding its predicates for `infertest.Verify`.
+- **Distinct preprocessor responsibilities.** The `proven` pass discharges via flow analysis; the `prove` pass injects facts at successful-check branches (runtime code is unchanged); the `trust` pass injects facts unconditionally and erases the call; the `infer` pass consumes declared rules for backward-chaining. Four passes, each focused.
 
 All four packages share the preprocessor infrastructure (toolexec entry, per-package scan, AST walker, diagnostic emitter) but expose targeted APIs for each problem class. Users import only what they need.
 
@@ -136,4 +118,4 @@ All four packages share the preprocessor infrastructure (toolexec entry, per-pac
 | `proven` | `That` / `Returns` / `And` / `Or` / `Not` implemented; preprocessor discharges call sites (Phases 1–5) and erases cleared calls. |
 | `prove`  | `That(v, preds...) (T, error)` and `Must(v, preds...) T` implemented; preprocessor propagates post-check facts (Phase 3). |
 | `trust`  | `That(v, preds...) T` implemented in `pkg/trust/`; preprocessor injects facts at every call site and erases the call (Phase 7). |
-| `infer`  | Inference rules (`From(p).To(q)` / `From(p).Given(c).To(q)`) implemented; preprocessor uses them for backward-chaining discharge (Phase 4). Compile-time evaluation (`infer.Const`) still future. |
+| `infer`  | Inference rules (`From(p).To(q)` / `From(p).Given(c).To(q)`) implemented; preprocessor uses them for backward-chaining discharge (Phase 4). |

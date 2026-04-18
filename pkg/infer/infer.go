@@ -31,9 +31,59 @@
 // values, the other infers relationships between predicates.
 package infer
 
-// Rule is the declared inference fact. It has no runtime behavior;
-// the value exists only so declarations can live at package scope.
-type Rule struct{}
+// Rule is the declared inference fact. The preprocessor reads these
+// declarations from the AST and has no need of the runtime value, but
+// the predicates are retained so infertest (or any other runtime-
+// verification helper) can evaluate the implication against sample
+// inputs. Rule is intentionally non-generic so declarations can sit
+// uniformly at package scope; the typed predicates are held behind
+// `func(any) bool` wrappers that type-assert on entry.
+type Rule struct {
+	from  func(any) bool
+	given func(any) bool // nil when no .Given step was used
+	to    func(any) bool
+}
+
+// Check evaluates the rule on one sample value. Returns true when the
+// rule is either vacuously satisfied (premise — or Given, if present —
+// does not hold) or genuinely satisfied (premise and Given both hold
+// and conclusion also holds). Returns false only when the premise
+// (and Given) hold but the conclusion fails — a counter-example.
+//
+// A sample whose dynamic type does not match the rule's predicate
+// type reports false from the wrapper's type assertion, producing a
+// silent premise-miss (return true). This keeps Check from panicking
+// on mismatched types; verifiers should call it with samples of the
+// rule's declared type.
+func (r Rule) Check(sample any) bool {
+	if r.from == nil {
+		return true
+	}
+	if !r.from(sample) {
+		return true
+	}
+	if r.given != nil && !r.given(sample) {
+		return true
+	}
+	return r.to(sample)
+}
+
+// Applies reports whether the rule's premise (and Given, if present)
+// hold on sample — i.e. whether Check's result on this sample is
+// load-bearing. Useful for verifiers that want to distinguish
+// "rule did not apply" from "rule applied and was satisfied".
+func (r Rule) Applies(sample any) bool {
+	if r.from == nil {
+		return false
+	}
+	if !r.from(sample) {
+		return false
+	}
+	if r.given != nil && !r.given(sample) {
+		return false
+	}
+	return true
+}
 
 // From begins building an inference rule with a premise predicate.
 // Chain .Given (optional) and .To to complete it.
@@ -54,9 +104,10 @@ func (f FromStep[T]) Given(context func(T) bool) GivenStep[T] {
 
 // To completes an unconditional rule: from ⇒ conclusion.
 func (f FromStep[T]) To(conclusion func(T) bool) Rule {
-	_ = f.from
-	_ = conclusion
-	return Rule{}
+	return Rule{
+		from: wrapAny(f.from),
+		to:   wrapAny(conclusion),
+	}
 }
 
 // GivenStep is the intermediate builder after Given.
@@ -66,8 +117,22 @@ type GivenStep[T any] struct {
 
 // To completes a conditional rule: from ∧ given ⇒ conclusion.
 func (g GivenStep[T]) To(conclusion func(T) bool) Rule {
-	_ = g.from
-	_ = g.given
-	_ = conclusion
-	return Rule{}
+	return Rule{
+		from:  wrapAny(g.from),
+		given: wrapAny(g.given),
+		to:    wrapAny(conclusion),
+	}
+}
+
+// wrapAny lifts a typed predicate into the `func(any) bool` form the
+// non-generic Rule carries. A dynamic-type mismatch reports false so
+// Check degrades to a premise-miss rather than panicking.
+func wrapAny[T any](p func(T) bool) func(any) bool {
+	return func(v any) bool {
+		t, ok := v.(T)
+		if !ok {
+			return false
+		}
+		return p(t)
+	}
 }
