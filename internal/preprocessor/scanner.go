@@ -12,10 +12,16 @@ package preprocessor
 //
 // Scope intentionally narrow: v1 supports the direct-parameter-
 // reference shape documented in docs/design.md ("Argument
-// expressions"). An unresolvable predicate expression (inline
-// combinator, arbitrary expression, function literal) is silently
-// skipped today; Phase 3 will decide how to surface that as an
-// undischargeable obligation.
+// expressions"). When the scanner is called with a non-nil
+// diagnostics channel (the production toolexec path), an
+// unresolvable predicate expression (inline combinator,
+// arbitrary expression, function literal) or a non-parameter
+// subject at a proven.That site fails the build with a Go-standard
+// `file:line:col:` diagnostic — the same "no silent bypass"
+// principle the link gate enforces elsewhere. Passing diags == nil
+// restores the old lenient behavior for stand-alone API callers
+// (ScanPackage, tests) that do not surface diagnostics to the
+// toolchain.
 
 import (
 	"fmt"
@@ -125,7 +131,7 @@ func ScanPackage(importPath string, sources []string) (*PackageSummary, error) {
 		if err != nil {
 			return nil, fmt.Errorf("scan %s: %w", src, err)
 		}
-		scanFile(sum, importPath, f)
+		scanFile(sum, importPath, fset, f, nil)
 	}
 	return sum, nil
 }
@@ -135,7 +141,14 @@ func ScanPackage(importPath string, sources []string) (*PackageSummary, error) {
 // sum.Funcs; package-scope `var _ = infer.From(...)` chains
 // populate sum.Rules. Files that import neither pkg/proven nor
 // pkg/infer are skipped early.
-func scanFile(sum *PackageSummary, importPath string, f *ast.File) {
+//
+// diags (when non-nil) collects strict-mode diagnostics the scanner
+// produces when a proven.That / proven.Returns / infer.From.To site
+// cannot resolve its predicate argument to a named func or pkg.Name
+// selector. Passing nil disables strict-mode reporting for
+// stand-alone API calls (ScanPackage) that do not surface
+// diagnostics to the toolchain.
+func scanFile(sum *PackageSummary, importPath string, fset *token.FileSet, f *ast.File, diags *[]Diagnostic) {
 	imp := collectImports(f)
 	inferAlias := imp.aliasFor(inferImportPath)
 	if imp.provenAlias == "" && inferAlias == "" {
@@ -147,28 +160,28 @@ func scanFile(sum *PackageSummary, importPath string, f *ast.File) {
 			if d.Body == nil || imp.provenAlias == "" {
 				continue
 			}
-			if summary := scanFunc(d, imp, importPath); summary != nil {
+			if summary := scanFunc(d, imp, importPath, fset, diags); summary != nil {
 				sum.Funcs[summary.Key()] = summary
 			}
 		case *ast.GenDecl:
 			if d.Tok != token.VAR || inferAlias == "" {
 				continue
 			}
-			scanInferRules(sum, imp, importPath, inferAlias, d)
+			scanInferRules(sum, imp, importPath, inferAlias, d, fset, diags)
 		}
 	}
 }
 
 // scanInferRules examines each ValueSpec value in genDecl for an
 // inference-rule chain and appends any matches to sum.Rules.
-func scanInferRules(sum *PackageSummary, imp *importInfo, importPath, inferAlias string, genDecl *ast.GenDecl) {
+func scanInferRules(sum *PackageSummary, imp *importInfo, importPath, inferAlias string, genDecl *ast.GenDecl, fset *token.FileSet, diags *[]Diagnostic) {
 	for _, spec := range genDecl.Specs {
 		vs, ok := spec.(*ast.ValueSpec)
 		if !ok {
 			continue
 		}
 		for _, val := range vs.Values {
-			if rule, ok := extractInferRule(val, inferAlias, imp, importPath); ok {
+			if rule, ok := extractInferRule(val, inferAlias, imp, importPath, fset, diags); ok {
 				sum.Rules = append(sum.Rules, rule)
 			}
 		}
@@ -183,21 +196,22 @@ func scanInferRules(sum *PackageSummary, imp *importInfo, importPath, inferAlias
 // and returns the rule identity. The outermost call is always
 // `.To(conclusion)`; its receiver is either `.From(premise)`
 // directly or `.Given(context)` wrapping `.From(premise)`.
-// Unresolvable predicate arguments or any structural mismatch
-// produces (_, false) so the caller silently skips the
-// declaration — matching the scanner's policy of over-tolerance
-// for user code the preprocessor does not understand.
-func extractInferRule(expr ast.Expr, inferAlias string, imp *importInfo, importPath string) (InferRule, bool) {
+// Structural mismatches (a call that does not match either fluent
+// shape at all) silently return (_, false) — they are not rules.
+// Predicate arguments that ARE in a matching rule shape but cannot
+// be resolved to a named func or pkg.Name selector emit a strict-
+// mode diagnostic via diags, so function literals and inline
+// combinator calls at rule-declaration sites fail the build instead
+// of being silently dropped. Pass diags == nil to keep the old
+// lenient behavior (used by ScanPackage, a standalone API not in
+// the toolchain path).
+func extractInferRule(expr ast.Expr, inferAlias string, imp *importInfo, importPath string, fset *token.FileSet, diags *[]Diagnostic) (InferRule, bool) {
 	toCall, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return InferRule{}, false
 	}
 	toSel, ok := toCall.Fun.(*ast.SelectorExpr)
 	if !ok || toSel.Sel.Name != "To" || len(toCall.Args) != 1 {
-		return InferRule{}, false
-	}
-	conclusion, ok := resolvePredicate(toCall.Args[0], imp, importPath)
-	if !ok {
 		return InferRule{}, false
 	}
 
@@ -207,6 +221,14 @@ func extractInferRule(expr ast.Expr, inferAlias string, imp *importInfo, importP
 	}
 	innerSel, ok := inner.Fun.(*ast.SelectorExpr)
 	if !ok {
+		return InferRule{}, false
+	}
+
+	// We have committed to this being an infer rule: any unresolvable
+	// predicate argument below emits a strict-mode diagnostic.
+	conclusion, ok := resolvePredicate(toCall.Args[0], imp, importPath)
+	if !ok {
+		reportBadPredicate(diags, fset, toCall.Args[0], "conclusion of infer rule")
 		return InferRule{}, false
 	}
 
@@ -221,6 +243,7 @@ func extractInferRule(expr ast.Expr, inferAlias string, imp *importInfo, importP
 		}
 		premise, ok := resolvePredicate(inner.Args[0], imp, importPath)
 		if !ok {
+			reportBadPredicate(diags, fset, inner.Args[0], "premise of infer.From")
 			return InferRule{}, false
 		}
 		return InferRule{From: premise, To: conclusion}, true
@@ -228,10 +251,6 @@ func extractInferRule(expr ast.Expr, inferAlias string, imp *importInfo, importP
 	case "Given":
 		// infer.From(premise).Given(context).To(conclusion)
 		if len(inner.Args) != 1 {
-			return InferRule{}, false
-		}
-		given, ok := resolvePredicate(inner.Args[0], imp, importPath)
-		if !ok {
 			return InferRule{}, false
 		}
 		fromCall, ok := innerSel.X.(*ast.CallExpr)
@@ -245,13 +264,66 @@ func extractInferRule(expr ast.Expr, inferAlias string, imp *importInfo, importP
 		if !isInferIdent(fromSel.X, inferAlias) {
 			return InferRule{}, false
 		}
+		given, ok := resolvePredicate(inner.Args[0], imp, importPath)
+		if !ok {
+			reportBadPredicate(diags, fset, inner.Args[0], "context of infer.Given")
+			return InferRule{}, false
+		}
 		premise, ok := resolvePredicate(fromCall.Args[0], imp, importPath)
 		if !ok {
+			reportBadPredicate(diags, fset, fromCall.Args[0], "premise of infer.From")
 			return InferRule{}, false
 		}
 		return InferRule{From: premise, Given: &given, To: conclusion}, true
 	}
 	return InferRule{}, false
+}
+
+// reportBadPredicate appends a strict-mode diagnostic pointing at
+// expr's position with a standard "predicate must be a named
+// function or pkg.Name selector" message. No-op when diags is nil.
+// role is a short phrase naming the site (e.g. "argument to
+// proven.That", "premise of infer.From") so the message tells the
+// user *which* predicate slot is the problem when several appear
+// close together.
+func reportBadPredicate(diags *[]Diagnostic, fset *token.FileSet, expr ast.Expr, role string) {
+	if diags == nil || fset == nil {
+		return
+	}
+	pos := fset.Position(expr.Pos())
+	*diags = append(*diags, Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg: fmt.Sprintf(
+			"proven: %s must be a named function or pkg.Name selector — function literals and inline expressions are not supported; declare the predicate at package scope",
+			role,
+		),
+	})
+}
+
+// reportBadSubject mirrors reportBadPredicate for the *subject* slot
+// of proven.That: the value the obligation is asserted on must be a
+// direct parameter identifier, since the discharge analyzer tracks
+// facts by parameter index across call sites. Computed expressions
+// (`proven.That(foo.bar, p)`, `proven.That(compute(x), p)`) are v2
+// scope and fail the build in strict mode so users are not misled
+// into thinking they've declared an obligation the preprocessor
+// cannot actually enforce.
+func reportBadSubject(diags *[]Diagnostic, fset *token.FileSet, expr ast.Expr, role string) {
+	if diags == nil || fset == nil {
+		return
+	}
+	pos := fset.Position(expr.Pos())
+	*diags = append(*diags, Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg: fmt.Sprintf(
+			"proven: %s must be a parameter identifier — computed subjects and non-parameter variables are not supported in v1",
+			role,
+		),
+	})
 }
 
 // isInferIdent reports whether expr is the identifier for the
@@ -303,7 +375,7 @@ func collectImports(f *ast.File) *importInfo {
 // contains at least one proven.That or proven.Returns call whose
 // arguments the scanner could resolve. Returns nil otherwise so
 // unannotated functions do not clutter the summary map.
-func scanFunc(fn *ast.FuncDecl, imp *importInfo, importPath string) *FuncSummary {
+func scanFunc(fn *ast.FuncDecl, imp *importInfo, importPath string, fset *token.FileSet, diags *[]Diagnostic) *FuncSummary {
 	summary := &FuncSummary{
 		Name:       fn.Name.Name,
 		ParamPreds: make(map[int][]Predicate),
@@ -324,9 +396,9 @@ func scanFunc(fn *ast.FuncDecl, imp *importInfo, importPath string) *FuncSummary
 		}
 		switch kind {
 		case "That":
-			recordThat(summary, paramIdx, call, imp, importPath)
+			recordThat(summary, paramIdx, call, imp, importPath, fset, diags)
 		case "Returns":
-			recordReturns(summary, call, imp, importPath)
+			recordReturns(summary, call, imp, importPath, fset, diags)
 		}
 		return true
 	})
@@ -358,38 +430,55 @@ func matchProvenCall(call *ast.CallExpr, provenAlias string) (string, bool) {
 
 // recordThat handles a matched proven.That call. The first
 // argument must be a direct identifier naming a parameter of the
-// enclosing function — other shapes are v2 scope and are ignored.
-// Subsequent arguments are each resolved to a Predicate.
-func recordThat(s *FuncSummary, paramIdx map[string]int, call *ast.CallExpr, imp *importInfo, importPath string) {
+// enclosing function; a non-identifier subject or an identifier
+// that isn't a parameter is a strict-mode error (complex subjects
+// are v2 scope and cannot be tracked across call sites). Each
+// subsequent argument must resolve to a named predicate; function
+// literals, inline combinators, and other expressions fail the
+// build rather than being silently dropped.
+func recordThat(s *FuncSummary, paramIdx map[string]int, call *ast.CallExpr, imp *importInfo, importPath string, fset *token.FileSet, diags *[]Diagnostic) {
 	if len(call.Args) < 2 {
 		return
 	}
 	id, ok := call.Args[0].(*ast.Ident)
 	if !ok {
+		reportBadSubject(diags, fset, call.Args[0], "first argument to proven.That")
 		return
 	}
 	idx, ok := paramIdx[id.Name]
 	if !ok {
+		reportBadSubject(diags, fset, call.Args[0], "first argument to proven.That")
 		return
 	}
 	for _, arg := range call.Args[1:] {
-		if pred, ok := resolvePredicate(arg, imp, importPath); ok {
-			s.ParamPreds[idx] = append(s.ParamPreds[idx], pred)
+		pred, ok := resolvePredicate(arg, imp, importPath)
+		if !ok {
+			reportBadPredicate(diags, fset, arg, "argument to proven.That")
+			continue
 		}
+		s.ParamPreds[idx] = append(s.ParamPreds[idx], pred)
 	}
 }
 
 // recordReturns handles a matched proven.Returns call. The value
-// argument is not inspected (any expression is permitted as a
-// return value); only the predicates are recorded.
-func recordReturns(s *FuncSummary, call *ast.CallExpr, imp *importInfo, importPath string) {
+// argument is not inspected by the scanner — any expression is
+// permitted as a return value; the analyzer is responsible for
+// verifying that the value actually satisfies the declared
+// predicates. Each predicate argument must resolve to a named
+// function or pkg.Name selector; function literals and inline
+// combinator calls fail the build rather than being silently
+// dropped.
+func recordReturns(s *FuncSummary, call *ast.CallExpr, imp *importInfo, importPath string, fset *token.FileSet, diags *[]Diagnostic) {
 	if len(call.Args) < 2 {
 		return
 	}
 	for _, arg := range call.Args[1:] {
-		if pred, ok := resolvePredicate(arg, imp, importPath); ok {
-			s.ReturnPreds = append(s.ReturnPreds, pred)
+		pred, ok := resolvePredicate(arg, imp, importPath)
+		if !ok {
+			reportBadPredicate(diags, fset, arg, "argument to proven.Returns")
+			continue
 		}
+		s.ReturnPreds = append(s.ReturnPreds, pred)
 	}
 }
 

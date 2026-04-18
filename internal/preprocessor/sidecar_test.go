@@ -170,7 +170,7 @@ func caller(x int) {
 	var calls []CallDischarge
 	for _, decl := range f.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
-			calls = append(calls, AnalyzeFunc(fn, aSum, imp, imports)...)
+			calls = append(calls, AnalyzeFunc(fn, aSum, imp, imports, fset, nil)...)
 		}
 	}
 	// The call should be recorded as a discharge; CalleePkg
@@ -223,7 +223,7 @@ func caller(x int) {
 	var calls []CallDischarge
 	for _, decl := range f.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
-			calls = append(calls, AnalyzeFunc(fn, aSum, imp, imports)...)
+			calls = append(calls, AnalyzeFunc(fn, aSum, imp, imports, fset, nil)...)
 		}
 	}
 	if len(calls) != 1 {

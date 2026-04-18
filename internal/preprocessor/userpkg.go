@@ -69,8 +69,9 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 		ImportPath: pkgPath,
 		Funcs:      make(map[string]*FuncSummary),
 	}
+	var scanDiags []Diagnostic
 	for _, f := range files {
-		scanFile(sum, pkgPath, f)
+		scanFile(sum, pkgPath, fset, f, &scanDiags)
 	}
 
 	// Imported-package summaries. Sidecars written during earlier
@@ -85,6 +86,17 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	// undischarged-obligation diagnostic the summary would have
 	// cleared.
 	imports, _ := readImportSummaries(compileImportcfg(toolArgs))
+
+	// Strict-mode scanner diagnostics take precedence over everything
+	// else: if the user wrote `proven.That(x, func() bool {...})` or
+	// a similarly-unresolvable predicate, the package is structurally
+	// broken and we must fail the build before analysis, rewriting,
+	// or sidecar emission. Scan diagnostics are surfaced even for
+	// packages that would otherwise short-circuit (no obligations,
+	// no imports) because the shape error is real regardless.
+	if len(scanDiags) > 0 {
+		return &Plan{Diags: scanDiags}, nil
+	}
 
 	// No obligations and no imported summaries contribute anything
 	// actionable. The package uses neither proven.That nor
@@ -110,8 +122,14 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	// not be written because downstream packages would then
 	// discharge against a function whose own callers are still
 	// unproven.
-	discharges := analyzePackageFiles(sum, files, imports)
-	var diags []Diagnostic
+	//
+	// Analyzer-produced strict-mode diagnostics (unresolvable
+	// predicate at a prove/trust call site) merge with discharge
+	// diagnostics: any of the three shapes — scan, analyze, or
+	// undischarged — is a hard build failure.
+	var analyzerDiags []Diagnostic
+	discharges := analyzePackageFiles(sum, files, imports, fset, &analyzerDiags)
+	diags := analyzerDiags
 	for _, d := range discharges {
 		if !d.Undischarged() {
 			continue
@@ -172,13 +190,19 @@ func parsePackageSources(sources []string) (*token.FileSet, []*ast.File, error) 
 // package's import path to its PackageSummary (read from its
 // sidecar during the compile of the current package) so
 // cross-package obligations participate in discharge.
-func analyzePackageFiles(sum *PackageSummary, files []*ast.File, imports map[string]*PackageSummary) []CallDischarge {
+//
+// fset + diags enable strict-mode diagnostics produced inside the
+// analyzer (e.g. at prove.That / prove.Must / trust.That sites
+// whose predicate argument is unresolvable). Passing nil for either
+// disables strict reporting — used by tests that exercise
+// same-package-only flow without a diagnostic channel.
+func analyzePackageFiles(sum *PackageSummary, files []*ast.File, imports map[string]*PackageSummary, fset *token.FileSet, diags *[]Diagnostic) []CallDischarge {
 	var all []CallDischarge
 	for _, f := range files {
 		imp := collectImports(f)
 		for _, decl := range f.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok {
-				all = append(all, AnalyzeFunc(fn, sum, imp, imports)...)
+				all = append(all, AnalyzeFunc(fn, sum, imp, imports, fset, diags)...)
 			}
 		}
 	}

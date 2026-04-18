@@ -208,10 +208,17 @@ func Plain(x int) int { return x * 2 }
 }
 
 func TestScan_SkipsUnresolvedPredicateExpressions(t *testing.T) {
-	// Combinator calls, function literals, and arbitrary
-	// expressions are out of v1 scope (docs/design.md "Argument
-	// expressions"). The scanner silently skips them so they do
-	// not contaminate the summary with ghost predicates.
+	// When the scanner is called with diags == nil (stand-alone
+	// API path, as scanFromString does below), an unresolvable
+	// predicate expression — combinator call, function literal,
+	// arbitrary expression — is silently dropped from the summary.
+	// The production toolexec path passes a non-nil diags and
+	// turns the same shape into a build-failing diagnostic; see
+	// testdata/cases/predicate_lambda_fails and
+	// predicate_inline_combinator_fails for that path. This test
+	// locks in the lenient-mode behavior specifically so the
+	// stand-alone API can keep scanning partially-broken sources
+	// without panicking.
 	src := `package ex
 
 import "github.com/GiGurra/proven/pkg/proven"
@@ -236,9 +243,13 @@ func Do(amount int) {
 
 func TestScan_NonIdentValueArgIsSkipped(t *testing.T) {
 	// The first argument to proven.That must be a direct parameter
-	// reference in v1. Calls with any other value expression
-	// produce no obligation entry — Phase 3 would not be able to
-	// tie the obligation to any specific parameter anyway.
+	// reference in v1. In lenient mode (diags == nil, as used by
+	// this test's scanFromString helper) calls with any other value
+	// expression produce no obligation entry — Phase 3 would not be
+	// able to tie the obligation to any specific parameter anyway.
+	// In strict mode (diags != nil, the production toolexec path) a
+	// non-parameter subject fails the build; see
+	// testdata/cases/that_non_param_subject_fails.
 	src := `package ex
 
 import "github.com/GiGurra/proven/pkg/proven"

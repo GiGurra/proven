@@ -129,7 +129,12 @@ type ParamDischarge struct {
 // imports may be nil — same-package-only mode. Tests that do not
 // need cross-package resolution pass nil; Phase 6's compile path
 // assembles the map from the compile's -importcfg.
-func AnalyzeFunc(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo, imports map[string]*PackageSummary) []CallDischarge {
+//
+// fset + diags enable strict-mode reporting at prove/trust/proven
+// sites where a predicate expression cannot be resolved to a named
+// func or pkg.Name selector. Pass nil for either to disable strict
+// mode (used by tests that do not surface diagnostics).
+func AnalyzeFunc(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo, imports map[string]*PackageSummary, fset *token.FileSet, diags *[]Diagnostic) []CallDischarge {
 	if caller.Body == nil {
 		return nil
 	}
@@ -141,6 +146,8 @@ func AnalyzeFunc(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo,
 		proveAlias:  imp.aliasFor(proveImportPath),
 		trustAlias:  imp.aliasFor(trustImportPath),
 		provenAlias: imp.provenAlias,
+		fset:        fset,
+		diags:       diags,
 	}
 	a.analyzeBlock(caller.Body)
 	return a.out
@@ -158,6 +165,8 @@ type analyzer struct {
 	proveAlias  string
 	trustAlias  string
 	provenAlias string
+	fset        *token.FileSet
+	diags       *[]Diagnostic
 }
 
 // analyzeBlock walks the statements of block in order under the
@@ -622,7 +631,7 @@ func (a *analyzer) applyAssignPostconditions(s *ast.AssignStmt) {
 	}
 	// prove.Must(v, pred...) — unconditional postcondition on LHS.
 	if a.isProveCall(call, "Must") {
-		preds := a.proveCallPredicates(call)
+		preds := a.proveCallPredicates(call, "Must")
 		for _, lhs := range s.Lhs {
 			if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
 				for _, p := range preds {
@@ -680,7 +689,7 @@ func (a *analyzer) applyDeclPostconditions(vs *ast.ValueSpec) {
 		}
 	}
 	if a.isProveCall(call, "Must") {
-		preds := a.proveCallPredicates(call)
+		preds := a.proveCallPredicates(call, "Must")
 		for _, name := range vs.Names {
 			if name.Name != "_" {
 				for _, p := range preds {
@@ -838,7 +847,7 @@ func (a *analyzer) detectProveAssign(stmt ast.Stmt) *proveAssign {
 	if !a.isProveCall(call, "That") {
 		return nil
 	}
-	preds := a.proveCallPredicates(call)
+	preds := a.proveCallPredicates(call, "That")
 	facts := make([]Fact, 0, len(preds))
 	for _, p := range preds {
 		facts = append(facts, Fact{Pred: p, Var: valueID.Name})
@@ -905,11 +914,11 @@ func (a *analyzer) isProveCall(call *ast.CallExpr, which string) bool {
 }
 
 // proveCallPredicates returns the predicates passed after the
-// value argument to a prove.That or prove.Must call. Args that
-// cannot be resolved to a Predicate are skipped, matching the
-// scanner's policy.
-func (a *analyzer) proveCallPredicates(call *ast.CallExpr) []Predicate {
-	return a.resolveTrailingPredicates(call)
+// value argument to a prove.That or prove.Must call. Unresolvable
+// predicate arguments emit a strict-mode diagnostic via the
+// analyzer's diags channel (when non-nil).
+func (a *analyzer) proveCallPredicates(call *ast.CallExpr, which string) []Predicate {
+	return a.resolveTrailingPredicates(call, "argument to prove."+which)
 }
 
 // isTrustCall reports whether call is `<trustAlias>.<which>(...)`.
@@ -931,24 +940,31 @@ func (a *analyzer) isTrustCall(call *ast.CallExpr, which string) bool {
 
 // trustCallPredicates returns the predicates passed after the
 // value argument to a trust.That call. Unresolvable predicate
-// args are skipped, matching the scanner's policy.
+// arguments emit a strict-mode diagnostic (when the analyzer was
+// constructed with a diags channel).
 func (a *analyzer) trustCallPredicates(call *ast.CallExpr) []Predicate {
-	return a.resolveTrailingPredicates(call)
+	return a.resolveTrailingPredicates(call, "argument to trust.That")
 }
 
 // resolveTrailingPredicates is the common body behind
 // proveCallPredicates and trustCallPredicates: both `pkg.That(v,
 // preds...)` shapes take the value as the first argument and
-// predicates as every subsequent argument.
-func (a *analyzer) resolveTrailingPredicates(call *ast.CallExpr) []Predicate {
+// predicates as every subsequent argument. Unresolvable predicate
+// arguments are reported via the analyzer's diagnostic channel
+// (when non-nil) using the caller-supplied role label so the
+// message identifies which site is the problem.
+func (a *analyzer) resolveTrailingPredicates(call *ast.CallExpr, role string) []Predicate {
 	if len(call.Args) < 2 {
 		return nil
 	}
 	var out []Predicate
 	for _, arg := range call.Args[1:] {
-		if p, ok := resolvePredicate(arg, a.imp, a.summary.ImportPath); ok {
-			out = append(out, p)
+		p, ok := resolvePredicate(arg, a.imp, a.summary.ImportPath)
+		if !ok {
+			reportBadPredicate(a.diags, a.fset, arg, role)
+			continue
 		}
+		out = append(out, p)
 	}
 	return out
 }
@@ -989,11 +1005,11 @@ func analyzeSource(importPath, src string) ([]CallDischarge, error) {
 		ImportPath: importPath,
 		Funcs:      make(map[string]*FuncSummary),
 	}
-	scanFile(sum, importPath, f)
+	scanFile(sum, importPath, fset, f, nil)
 	var all []CallDischarge
 	for _, decl := range f.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
-			all = append(all, AnalyzeFunc(fn, sum, imp, nil)...)
+			all = append(all, AnalyzeFunc(fn, sum, imp, nil, fset, nil)...)
 		}
 	}
 	return all, nil
@@ -1028,7 +1044,7 @@ func AnalyzePackage(importPath string, sources []string) (*PackageSummary, []Cal
 		files = append(files, f)
 	}
 	for _, f := range files {
-		scanFile(sum, importPath, f)
+		scanFile(sum, importPath, fset, f, nil)
 	}
 	if len(sum.Funcs) == 0 {
 		return sum, nil, fset, nil
@@ -1038,7 +1054,7 @@ func AnalyzePackage(importPath string, sources []string) (*PackageSummary, []Cal
 		imp := collectImports(f)
 		for _, decl := range f.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok {
-				all = append(all, AnalyzeFunc(fn, sum, imp, nil)...)
+				all = append(all, AnalyzeFunc(fn, sum, imp, nil, fset, nil)...)
 			}
 		}
 	}

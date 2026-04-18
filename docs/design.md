@@ -75,11 +75,14 @@ The preprocessor accepts these discharge patterns in the caller. All of them pro
 - **Local fact injection with [`trust`](companion-packages.md) — the "trust me" escape hatch.** Every other discharge path in proven gets the compiler (or a runtime check) behind the claim. `trust.That(v, preds...) T` is the one call site where *you* stand behind it instead: no runtime check, no static proof, the fact is accepted on your word and your git blame is the evidence. The preprocessor erases the call and treats each listed predicate as a fact on the LHS. Use when a value has already been validated by a mechanism the analyzer cannot see (external schema validator, prior audited invariant, DB CHECK constraint). Reach for `prove.Must` first if a free runtime check would do — `trust.That` earns its keep only when re-validation would duplicate a known-correct earlier check and the cost is meaningful.
 - **Declared implication.** When the caller has established predicate `P` and the callee requires `Q`, the preprocessor discharges `Q` if the module declares `infer.From(P).To(Q)` (optionally with `.Given(ctx)`). Implications are **trusted** — no symbolic verification — but `infertest.Verify(t, rule, samples...)` lets you property-test a rule at test time to catch declared-but-false implications.
 
-Patterns not supported in v1:
-- Literal analysis (`proven.That(42, isPositive)` — the constant `42` is not discharged even though it trivially satisfies the predicate; wrap in a guard).
-- Interprocedural flow into arbitrary helper functions.
-- Proof through complex argument expressions (`That(transform(x), p)` is v2).
-- Symbolic predicate reasoning beyond declared `infer` rules (full SMT remains out of scope).
+Patterns not supported in v1 — the preprocessor **fails the build** with a Go-standard `file:line:col:` diagnostic rather than silently dropping the obligation:
+
+- **Unnamed predicates.** Every predicate argument to `proven.That`, `proven.Returns`, `prove.That`, `prove.Must`, `trust.That`, and each slot in `infer.From(...).[Given(...).]To(...)` must be a named function or a `pkg.Name` selector. Function literals and inline combinator calls (`proven.And(a, b)` passed directly to `That`) fail the build; assign them to a package-level `var` and reference the name. This is the "no silent bypass" principle in the scanner: a predicate the scanner cannot track by identity cannot be used for cross-package discharge, and accepting it would silently weaken the contract.
+- **Non-parameter subjects.** The first argument to `proven.That` must be an identifier that is a parameter of the enclosing function. Computed subjects (`proven.That(foo.bar, p)`, `proven.That(compute(x), p)`) and non-parameter locals fail the build: they have no position in the callee's signature that callers could be required to discharge.
+- **Literal analysis.** `proven.That(42, isPositive)` does not constant-fold in the scanner — wrap the value in a guard, a `prove.Must`, or a `trust.That`.
+- **Interprocedural flow into arbitrary helper functions** without a `proven.That` precondition declared by the helper itself.
+- **Proof through complex argument expressions** (`That(transform(x), p)` is v2).
+- **Symbolic predicate reasoning beyond declared `infer` rules** (full SMT remains out of scope).
 
 ## Relations between values
 

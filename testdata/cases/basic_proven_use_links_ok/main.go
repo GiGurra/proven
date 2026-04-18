@@ -12,6 +12,13 @@ import "github.com/GiGurra/proven/pkg/proven"
 
 func isPositive(x int) bool { return x > 0 }
 
+func accept(x int) {
+	proven.That(x, isPositive)
+}
+
 func main() {
-	proven.That(42, isPositive)
+	x := 5
+	if isPositive(x) {
+		accept(x)
+	}
 }
