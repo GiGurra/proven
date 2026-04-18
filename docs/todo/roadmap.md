@@ -50,6 +50,52 @@ Cache-invalidation strategy has to be decided: rewire's "warn and require `go cl
 
 **Start after.** Measurement. Profile first, design second, code third. The best cache is the one we know we need.
 
+### Phase 10 — Methods as predicates
+
+**Goal.** Accept bound methods as predicate arguments, expanding the expressive range of the contract system beyond bare functions.
+
+Current state: the scanner's `resolvePredicate` recognizes `*ast.Ident` (same-package free function) and `*ast.SelectorExpr` with a package-alias receiver (`pkg.Fn`). It does NOT recognize a selector whose receiver is a value or type — e.g. `myReceiver.IsValid` or `(*MyType).IsValid`. These are legitimate `func(T) bool` values at the Go type level, and the analyzer has no principled reason to reject them. Strict mode currently rejects them with `proven: argument to proven.That must be a named function or pkg.Name selector` (from the change landed alongside the lambda-rejection fix).
+
+Design work the phase has to cover:
+
+- **Predicate identity.** A method expression `MyType.IsValid` has a stable package + receiver + method triple. A method value `instance.IsValid` has the same stable triple at the declaration site, but is bound at a specific instance; two instances call the same method. For cross-package discharge, identity must be "same method on same receiver type" — different bindings of the same method are the same predicate. This matches Go's semantics but extends `Predicate{Pkg, Name}` to `Predicate{Pkg, Recv, Name}`.
+- **Receiver in the guard.** `if x.IsValid() { Target(x) }` — the analyzer's guard walker sees a CallExpr with a SelectorExpr Fun. It must resolve the selector to a method identity, decide whether the method is a predicate (signature `() bool` at call site, since the receiver is bound), and plant a fact.
+- **Cross-package sidecar.** The `Predicate` shape in JSON needs the receiver field. Straightforward but breaks sidecar compatibility — a migration note or version bump on the sidecar format will be needed.
+- **proventest.AssertFails / Verify.** These take `pred func(T) bool`. A method value `x.IsValid` already has that type in Go, so the test-time API needs no change. A method expression `MyType.IsValid` has type `func(MyType) bool` and also works.
+
+Expected shape after the phase:
+
+```go
+type Session struct { id string }
+func (s Session) IsAuthenticated() bool { return s.id != "" }
+
+func modifyResource(s Session) {
+    proven.That(s, Session.IsAuthenticated) // method expression — predicate identity is (pkg, Session, IsAuthenticated)
+}
+
+func handler(s Session) {
+    if s.IsAuthenticated() {
+        modifyResource(s) // discharged
+    }
+}
+```
+
+Out of scope for Phase 10: pointer vs value receiver equivalence (treating `Session.IsValid` and `(*Session).IsValid` as the same predicate — v2 if ever), generic methods (deferred with generic predicate support generally).
+
+### Phase 11 — Closures / lambdas as predicates
+
+**Goal.** Accept function literals (and combinator calls that produce unnamed `func(T) bool` values) as predicate arguments, without silently weakening the contract.
+
+Current state: function literals and inline combinator calls are rejected at build time because they have no stable package + name identity, which means the preprocessor cannot correlate a lambda used as an obligation in one place with the same-or-compatible lambda used as a fact in another. Phase 11 asks: can we give lambdas a useful compile-time identity that enables same-file or same-package discharge?
+
+Three sub-questions the design has to close:
+
+- **Identity.** A lambda has no name. Possible bases: the lambda's source text (after gofmt normalization), its AST hash, its syntactic position (`file:offset`), or a content-hash of its body. Each has tradeoffs: source-text and AST-hash give structural equality (two identical lambdas in different files are "the same"), position-based gives per-definition identity (different lambdas at different positions are distinct even when textually identical). Which matches user intent?
+- **Scope of use.** Even with identity, a lambda defined in file A can't realistically be discharged by a fact established in file B unless both reference the same declared identifier — so the practical scope is "lambdas used multiple times within one file, or assigned to a package-scope var before use." The latter is already the recommended workaround today (`var p = func(x int) bool { ... }; proven.That(v, p)`), which means it already works — a named var binding a function literal passes the Ident resolver. The real gap is single-use inline `proven.That(v, func(x int) bool { ... })` which the preprocessor never sees at any other site.
+- **Inline combinators.** `proven.That(v, proven.And(a, b))` is the common case behind the lambda question. The combinator's result has no name, but its STRUCTURE is known: it is the AND of `a` and `b`, both of which ARE resolvable named predicates. A narrow rule — "accept combinator calls whose arguments are all named" — would resolve this without reintroducing silent-drop for genuine lambdas. Worth considering as a Phase 11a that ships before full lambda support.
+
+Out of scope for Phase 11: closures that capture enclosing variables (their bodies reference non-parameter state; cross-call identity is essentially impossible), lambdas that change over time (redefined in different builds — their identity would shift, breaking cache coherence).
+
 ## Out of scope
 
 - **`infer.Const` (compile-time evaluation of pure expressions).** Was briefly on the roadmap as Phase 9 under the argument that `infer` is where build-time deduction lives. When we sat down to design it we concluded it does not belong in this project: the contract system's value proposition (predicate obligations and their discharge) has essentially nothing in common with Zig-style comptime (running pure code at build time to emit literals), and bundling them under one package obscures both. The full exploration — 12 candidate execution models, real code spikes on four of them, final ranking — lives in [`docs/comptime.md`](../comptime.md), preserved for anyone who wants to pick this up as its own project.

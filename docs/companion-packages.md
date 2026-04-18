@@ -66,8 +66,15 @@ v, err := prove.That(raw, isPositive)
 // prove.Must — runtime check, panic on fail
 v := prove.Must(raw, isPositive)
 
-// trust.That — NO runtime check, asserts the fact, propagates it
+// trust.That — NO runtime check, asserts the fact, propagates it locally
 v := trust.That(raw, isPositive)
+
+// trust.Returns — NO runtime check, asserts the fact AND advertises it
+// as the enclosing function's postcondition (visible to every caller
+// across packages). Pairs with proven.Returns for the callee-advertised
+// postcondition story, but without the site verification proven.Returns
+// enforces.
+return trust.Returns(42, isPositive)
 ```
 
 Under the preprocessor: the call is erased and each listed predicate becomes a flow fact on the LHS, parallel to `prove.Must`'s analyzer handling but without the runtime side-effect. Without the preprocessor: the call is an identity pass-through at no runtime cost — a program that uses only `trust` links and runs without the toolexec pipeline.

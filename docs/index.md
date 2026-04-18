@@ -13,9 +13,18 @@ func Transfer(amount int, note string) error {
     // ... body ...
 }
 
-// Declare a postcondition on a return value:
+// Declare a postcondition on a return value. The value must carry the
+// predicate as a fact at the Returns site — here the function's own
+// declared precondition does that work:
+func Normalize(x int) int {
+    proven.That(x, isPositive)
+    return proven.Returns(x, isPositive)
+}
+
+// For a literal or computed expression the analyzer can't reason about,
+// trust.Returns vouches-and-advertises in one call:
 func DefaultUserID() int {
-    return proven.Returns(42, isPositive)
+    return trust.Returns(42, isPositive) // programmer: "42 is obviously positive"
 }
 
 // Declare an implication once; the preprocessor uses it to discharge obligations:

@@ -38,7 +38,7 @@ Earlier design iterations. Do not build on these; retained to explain why the cu
 - `pkg/proven/` — runtime stubs: `That`, `Returns`, `And`, `Or`, `Not`, plus the `atCompileTime` link-gated helper. `Violation` struct and `PredicateName` helper for diagnostics.
 - `pkg/proventest/` — test-only linker stub, `WithChecks`, `AssertFails`, `AssertAnyFailure`.
 - `pkg/prove/` — runtime boundary validators: `That(v, preds...) (T, error)` and `Must(v, preds...) T`.
-- `pkg/trust/` — local fact injection without runtime verification: `That(v, preds...) T`. Programmer takes responsibility for correctness; analyzer treats each listed predicate as a fact on the LHS and the rewriter erases the call.
+- `pkg/trust/` — the "trust me" escape hatch: `That(v, preds...) T` injects local facts with no runtime check, `Returns(v, preds...) T` combines that with `proven.Returns`-style postcondition advertisement (no site verification). Programmer takes responsibility for correctness.
 - `pkg/infer/` — fluent inference-rule builder (`From(...).Given(...).To(...)`); `Rule` carries `func(any) bool` wrappers over the typed predicates plus `Check`/`Applies` methods.
 - `pkg/infertest/` — property-test sibling: `Verify[T]` and stricter `VerifyApplies[T]` over `infer.Rule` catch declared-but-false inference rules at test time.
 - `example/basic/` — end-to-end usage sketch with wiring-verification tests (`TestWiring_*`).

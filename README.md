@@ -16,9 +16,18 @@ func Transfer(amount int, note string) error {
     // ... body ...
 }
 
-// Declare a postcondition on a return value:
+// Declare a postcondition on a return value. The value must already carry
+// the predicate as a fact at the Returns site — here the function's own
+// declared precondition does that work:
+func Normalize(x int) int {
+    proven.That(x, isPositive)
+    return proven.Returns(x, isPositive)
+}
+
+// For a literal or computed expression the analyzer can't reason about,
+// trust.Returns vouches-and-advertises in one call:
 func DefaultUserID() int {
-    return proven.Returns(42, isPositive)
+    return trust.Returns(42, isPositive) // programmer: "42 is obviously positive"
 }
 
 // Declare an implication once; the preprocessor uses it to discharge obligations:
@@ -125,7 +134,7 @@ main.go:NN:CC: proven: undischarged predicate isPositive on parameter 0 of Trans
 
 Same `file:line:col:` format Go's own compiler uses, so your editor click-through works. The diagnostic names the missing predicate, which parameter it's on, and which callee needed it — so the fix is either an explicit guard, a `prove.That` at the boundary, a `proven.Returns` postcondition from the producer, or a `trust.That` injection if you've validated it by a mechanism the analyzer can't see.
 
-**The five fact sources** the preprocessor recognizes in caller code:
+**Fact sources** the preprocessor recognizes:
 
 ```go
 // 1. Preceding predicate check.
@@ -144,14 +153,27 @@ if isPositive(x) && x < 100 {
     Target(x)        // both facts available in the body
 }
 
-// 4. proven.Returns postcondition.
-v := DefaultUserID() // DefaultUserID returns proven.Returns(_, isPositive)
+// 4. The function's own declared preconditions. Inside F's body,
+//    each parameter carries the predicates F declared on it as
+//    starting facts — every caller proved this at the call site,
+//    so inside F the facts hold by construction.
+func F(x int) {
+    proven.That(x, isPositive) // precondition
+    G(x)                       // G wants isPositive — discharged from seeding
+}
+
+// 5. proven.Returns postcondition.
+v := DefaultUserID() // DefaultUserID advertises isPositive via Returns
 Target(v)            // isPositive(v) is a fact
 
-// 5. prove.That or prove.Must success.
+// 6. prove.That or prove.Must success.
 v, err := prove.That(raw, isPositive)
 if err != nil { return err }
 Target(v)            // isPositive(v) is a fact on the err == nil side
+
+// 7. trust.That local injection.
+v := trust.That(raw, isPositive) // programmer's word, no runtime check
+Target(v)                        // isPositive(v) is a fact
 ```
 
 Obligations are discharged by direct fact match, by backward-chaining through declared inference rules, or by a `trust.That` injection. The proof rides along as far as you pass the value: each function along the chain declares the precondition it needs as its own `proven.That`, which — once discharged by the caller — becomes a fact inside that function's body for every downstream call that also needs it.
@@ -262,7 +284,15 @@ Transfer(v, note) // isPositive discharged on the programmer's word
 
 Reach for `prove.Must` first if a free runtime check would do — `trust.That` earns its keep only when re-validation would duplicate a known-correct earlier check and the cost is meaningful.
 
-`trust.That` is **local** — the fact is injected into the enclosing function's flow state only. For a function-level postcondition every caller can see across packages, use `proven.Returns`.
+`trust.That` is **local** — the fact is injected into the enclosing function's flow state only. For a function-level postcondition every caller can see across packages, use `proven.Returns`. The scanner verifies `proven.Returns` at the call site (the value must carry the predicates as facts), so for literals and computed expressions that the analyzer cannot reason about, use `trust.Returns` — the "trust me" variant of `proven.Returns` that both asserts the fact on your word AND advertises the postcondition:
+
+```go
+func DefaultUserID() int {
+    return trust.Returns(42, isPositive) // programmer: "42 is obviously positive"
+}
+```
+
+Callers of `DefaultUserID` get `isPositive` as a fact on the returned value, same as if the function used `proven.Returns`. There is no site verification — the whole point of trust is that you have vouched for it.
 
 </details>
 
@@ -367,7 +397,7 @@ GOCACHE="$HOME/.cache/proven-build" go clean -cache
 |---|---|
 | `pkg/proven` | Contract assertions: `That`, `Returns`, `And` / `Or` / `Not`. |
 | `pkg/prove` | Runtime boundary validators: `That(v, preds) (T, error)`, `Must(v, preds) T`. |
-| `pkg/trust` | Local fact injection without runtime check: `That(v, preds) T`. |
+| `pkg/trust` | Local fact injection without runtime check: `That(v, preds) T`. Plus `Returns(v, preds) T` — combines `trust.That` with `proven.Returns` (no-check postcondition advertisement). |
 | `pkg/infer` | Inference-rule builder: `From(p).[Given(c).]To(q)`. |
 | `pkg/infertest` | Property-test inference rules: `Verify(t, rule, samples...)`, `VerifyApplies`. |
 | `pkg/proventest` | Test-time linker stub + `WithChecks` / `AssertFails` / `AssertPasses` / `AssertAnyFailure`. |
