@@ -20,7 +20,8 @@ Rules are trusted — no symbolic verification. A future `infertest.Verify` woul
 ## Authoritative docs
 
 - [`docs/design.md`](docs/design.md) — the current authoritative design. Read this first.
-- [`docs/companion-packages.md`](docs/companion-packages.md) — the three-package vision: `proven` (compile-time contracts, implemented), `prove` (runtime boundary validation, future), `infer` (inference rules implemented; comptime `Const` future).
+- [`docs/companion-packages.md`](docs/companion-packages.md) — the three-package vision: `proven` (compile-time contracts), `prove` (runtime boundary validation, `That`/`Must` implemented), `infer` (inference rules implemented; comptime `Const` future).
+- [`docs/todo/roadmap.md`](docs/todo/roadmap.md) — **the resume-point for preprocessor work.** Where we are, which phases remain, what each phase looks like, open risks, and a "how to resume" checklist. Read before picking up preprocessor implementation.
 - [`docs/concept.md`](docs/concept.md) — original motivation. API names are partially out of date (see design.md / companion-packages.md) but preprocessor architecture and motivation still apply.
 
 ## Background reading (historical / superseded)
@@ -35,9 +36,13 @@ Earlier design iterations. Do not build on these; retained to explain why the cu
 
 - `pkg/proven/` — runtime stubs: `That`, `Returns`, `And`, `Or`, `Not`, plus the `atCompileTime` link-gated helper. `Violation` struct and `PredicateName` helper for diagnostics.
 - `pkg/proventest/` — test-only linker stub, `WithChecks`, `AssertFails`, `AssertAnyFailure`.
+- `pkg/prove/` — runtime boundary validators: `That(v, preds...) (T, error)` and `Must(v, preds...) T`.
 - `pkg/infer/` — fluent inference-rule builder (`From(...).Given(...).To(...)`); `Rule` marker type.
 - `example/basic/` — end-to-end usage sketch with wiring-verification tests (`TestWiring_*`).
-- **Preprocessor: not started.** Will follow the `rewire` shape (toolexec entry, per-package AST scan, rewrite). Flow-sensitive analysis is the new component; see `docs/design.md` for the narrow preprocessor scope.
+- `example/boundary/` — `prove` → `proven` flow example with wiring tests.
+- `cmd/proven/` — toolexec binary scaffold (currently a pure forwarder).
+- `internal/preprocessor/e2e_test.go` — golden-file harness over `testdata/cases/`.
+- **Preprocessor behavior: not started.** Roadmap in [`docs/todo/roadmap.md`](docs/todo/roadmap.md). Seed fixtures under `testdata/cases/` validate the harness in both success and failure directions.
 
 ## Conventions
 
