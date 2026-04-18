@@ -193,6 +193,11 @@ var _ = infer.From(isSmallPositive).To(isPositive)
 
 // Conditional: isEven ⇒ isPositive, but only when the value is positive
 var _ = infer.From(isEven).Given(isGreaterThanZero).To(isPositive)
+
+// Every slot is variadic and AND-composes — same as proven.That.
+// Multi-premise: every listed premise must hold for the rule to fire.
+// Multi-conclusion: every listed conclusion follows when it does.
+var _ = infer.From(isEven, isPositive).To(isNonNeg, isNonZero)
 ```
 
 The preprocessor consumes these during scan and uses backward chaining to discharge obligations without re-proving from scratch. Rules are **trusted** — the preprocessor does not symbolically verify them. Declarers are responsible for soundness, and `infertest.Verify` lets you property-test rules on sample inputs:

@@ -42,6 +42,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"slices"
 )
 
 // proveImportPath is the runtime-boundary-validation package
@@ -768,18 +769,38 @@ func (a *analyzer) dischargedRec(pred Predicate, varName string, visited map[Pre
 	visited[pred] = true
 
 	for _, rule := range a.allRules() {
-		if rule.To != pred {
+		if !ruleConcludes(rule, pred) {
 			continue
 		}
-		if !a.dischargedRec(rule.From, varName, visited) {
+		if !a.allDischarge(rule.From, varName, visited) {
 			continue
 		}
-		if rule.Given != nil && !a.dischargedRec(*rule.Given, varName, visited) {
+		if len(rule.Given) > 0 && !a.allDischarge(rule.Given, varName, visited) {
 			continue
 		}
 		return true
 	}
 	return false
+}
+
+// ruleConcludes reports whether pred appears in rule.To — i.e. the
+// rule is a candidate for deriving pred. Multi-conclusion rules
+// (AND-composed To) are treated as independently concluding each of
+// their listed predicates.
+func ruleConcludes(rule InferRule, pred Predicate) bool {
+	return slices.Contains(rule.To, pred)
+}
+
+// allDischarge reports whether every predicate in preds discharges
+// on varName under the current visited set — used for AND-composed
+// From / Given slots on a rule.
+func (a *analyzer) allDischarge(preds []Predicate, varName string, visited map[Predicate]bool) bool {
+	for _, p := range preds {
+		if !a.dischargedRec(p, varName, visited) {
+			return false
+		}
+	}
+	return true
 }
 
 // allRules returns the union of the current package's inference

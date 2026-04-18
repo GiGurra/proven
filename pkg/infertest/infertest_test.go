@@ -109,6 +109,37 @@ func TestVerifyApplies_PassesWhenSomeHit(t *testing.T) {
 	}
 }
 
+// TestVerify_MultiPremiseAndMultiConclusion — variadic From and To
+// slots AND-compose. The rule below reads "isEven AND isPositive
+// implies isSmallPositive AND isGreaterThanZero", and holds for
+// every positive even under 100. -2 misses the premise (isPositive
+// is false) so Verify skips it; 4 satisfies both conclusions.
+func TestVerify_MultiPremiseAndMultiConclusion(t *testing.T) {
+	rule := infer.From(isEven, isPositive).To(isSmallPositive, isGreaterThanZero)
+	rec := &recordingT{}
+	infertest.Verify(rec, rule, 2, 4, 98, -2, -4)
+	if rec.failed {
+		t.Errorf("sound multi-premise / multi-conclusion rule reported failure: %s", rec.log.String())
+	}
+}
+
+// TestVerify_MultiConclusionCatchesAnyFailure — with two conclusions,
+// a sample that satisfies the premise but violates either conclusion
+// is still a counter-example. isPositive AND isEven does not imply
+// isSmallPositive AND isGreaterThanZero: 100 violates isSmallPositive
+// even though isGreaterThanZero holds.
+func TestVerify_MultiConclusionCatchesAnyFailure(t *testing.T) {
+	rule := infer.From(isPositive, isEven).To(isSmallPositive, isGreaterThanZero)
+	rec := &recordingT{}
+	infertest.Verify(rec, rule, 4, 100)
+	if !rec.failed {
+		t.Fatal("multi-conclusion rule did not catch a per-conclusion counter-example")
+	}
+	if !strings.Contains(rec.log.String(), "rule violated on sample 100") {
+		t.Errorf("expected counter-example 100, got: %s", rec.log.String())
+	}
+}
+
 // recordingT captures Errorf calls so tests can assert on Verify's
 // behavior without actually failing the enclosing test. Implements
 // infertest.TestingT.

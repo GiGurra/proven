@@ -100,9 +100,14 @@ Declare that one predicate implies another, optionally under a context. The prov
 // At package scope — picked up by the preprocessor.
 var _ = infer.From(isSmallPositive).To(isPositive)
 var _ = infer.From(isEven).Given(isGreaterThanZero).To(isPositive)
+
+// Every slot is variadic and AND-composes, matching proven.That /
+// prove.That / trust.That. A multi-argument From requires every
+// premise; a multi-argument To asserts every conclusion.
+var _ = infer.From(isEven, isPositive).To(isNonNeg, isNonZero)
 ```
 
-Reads left-to-right as the logical statement: *"from this premise, [given this context,] we conclude this."* Rules are **trusted** — the preprocessor does not symbolically verify that the declared implication actually holds. `pkg/infertest.Verify(t, rule, samples...)` (implemented) offers a cheap property-test: it evaluates the rule's premise, Given, and conclusion on each sample and reports a failure whenever premise and Given both hold but conclusion does not. A stricter `VerifyApplies` additionally fails if no sample triggered the premise at all — useful when the caller is expected to supply a coverage-relevant sample set rather than relying on silent vacuous-truth.
+Reads left-to-right as the logical statement: *"from these premises, [given this context,] we conclude these."* Rules are **trusted** — the preprocessor does not symbolically verify that the declared implication actually holds. `pkg/infertest.Verify(t, rule, samples...)` (implemented) offers a cheap property-test: it evaluates the rule's premise, Given, and conclusion on each sample and reports a failure whenever premise and Given both hold but conclusion does not. A stricter `VerifyApplies` additionally fails if no sample triggered the premise at all — useful when the caller is expected to supply a coverage-relevant sample set rather than relying on silent vacuous-truth.
 
 Implemented: `pkg/infer/infer.go` (runtime stubs); `pkg/infertest/infertest.go` (`Verify`, `VerifyApplies`).
 

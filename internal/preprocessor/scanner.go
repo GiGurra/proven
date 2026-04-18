@@ -89,8 +89,12 @@ func (s *FuncSummary) Key() string {
 }
 
 // InferRule is one declared package-scope implication rule
-// harvested from `var _ = infer.From(premise).[Given(context).]To(conclusion)`.
-// Given is non-nil only when a .Given(...) step was present.
+// harvested from `var _ = infer.From(premises...).[Given(contexts...).]To(conclusions...)`.
+//
+// Every slot is variadic and AND-composed — the rule reads as
+// "if every From predicate AND every Given predicate holds on the
+// variable, then every To predicate holds on it". Given is empty
+// when no .Given(...) step was present.
 //
 // Rules are trusted — the scanner does not verify that the
 // implication actually holds (docs/design.md). Unresolvable
@@ -98,9 +102,9 @@ func (s *FuncSummary) Key() string {
 // cause the rule to be skipped rather than silently stored with
 // an empty identity.
 type InferRule struct {
-	From  Predicate
-	Given *Predicate
-	To    Predicate
+	From  []Predicate
+	Given []Predicate
+	To    []Predicate
 }
 
 // PackageSummary is the scanner output for one compile unit. Only
@@ -191,14 +195,16 @@ func scanInferRules(sum *PackageSummary, imp *importInfo, importPath, inferAlias
 
 // extractInferRule matches one of the two fluent shapes:
 //
-//	infer.From(premise).To(conclusion)
-//	infer.From(premise).Given(context).To(conclusion)
+//	infer.From(premises...).To(conclusions...)
+//	infer.From(premises...).Given(contexts...).To(conclusions...)
 //
-// and returns the rule identity. The outermost call is always
-// `.To(conclusion)`; its receiver is either `.From(premise)`
-// directly or `.Given(context)` wrapping `.From(premise)`.
-// Structural mismatches (a call that does not match either fluent
-// shape at all) silently return (_, false) — they are not rules.
+// Every slot is variadic and AND-composed: multiple premises mean
+// every premise must hold, multiple conclusions mean every conclusion
+// follows, multiple contexts AND the Given filter. Structural
+// mismatches (a call that does not match either fluent shape at all)
+// silently return (_, false) — they are not rules. An empty slot
+// (e.g. `infer.From().To(q)`) is treated as a structural mismatch.
+//
 // Predicate arguments that ARE in a matching rule shape but cannot
 // be resolved to a named func or pkg.Name selector emit a strict-
 // mode diagnostic via diags, so function literals and inline
@@ -212,7 +218,7 @@ func extractInferRule(expr ast.Expr, inferAlias string, imp *importInfo, importP
 		return InferRule{}, false
 	}
 	toSel, ok := toCall.Fun.(*ast.SelectorExpr)
-	if !ok || toSel.Sel.Name != "To" || len(toCall.Args) != 1 {
+	if !ok || toSel.Sel.Name != "To" || len(toCall.Args) == 0 {
 		return InferRule{}, false
 	}
 
@@ -227,31 +233,29 @@ func extractInferRule(expr ast.Expr, inferAlias string, imp *importInfo, importP
 
 	// We have committed to this being an infer rule: any unresolvable
 	// predicate argument below emits a strict-mode diagnostic.
-	conclusion, ok := resolvePredicate(toCall.Args[0], imp, importPath)
+	conclusions, ok := resolvePredicates(toCall.Args, imp, importPath, diags, fset, "conclusion of infer rule")
 	if !ok {
-		reportBadPredicate(diags, fset, toCall.Args[0], "conclusion of infer rule")
 		return InferRule{}, false
 	}
 
 	switch innerSel.Sel.Name {
 	case "From":
-		// infer.From(premise).To(conclusion)
+		// infer.From(premises...).To(conclusions...)
 		if !isInferIdent(innerSel.X, inferAlias) {
 			return InferRule{}, false
 		}
-		if len(inner.Args) != 1 {
+		if len(inner.Args) == 0 {
 			return InferRule{}, false
 		}
-		premise, ok := resolvePredicate(inner.Args[0], imp, importPath)
+		premises, ok := resolvePredicates(inner.Args, imp, importPath, diags, fset, "premise of infer.From")
 		if !ok {
-			reportBadPredicate(diags, fset, inner.Args[0], "premise of infer.From")
 			return InferRule{}, false
 		}
-		return InferRule{From: premise, To: conclusion}, true
+		return InferRule{From: premises, To: conclusions}, true
 
 	case "Given":
-		// infer.From(premise).Given(context).To(conclusion)
-		if len(inner.Args) != 1 {
+		// infer.From(premises...).Given(contexts...).To(conclusions...)
+		if len(inner.Args) == 0 {
 			return InferRule{}, false
 		}
 		fromCall, ok := innerSel.X.(*ast.CallExpr)
@@ -259,25 +263,46 @@ func extractInferRule(expr ast.Expr, inferAlias string, imp *importInfo, importP
 			return InferRule{}, false
 		}
 		fromSel, ok := fromCall.Fun.(*ast.SelectorExpr)
-		if !ok || fromSel.Sel.Name != "From" || len(fromCall.Args) != 1 {
+		if !ok || fromSel.Sel.Name != "From" || len(fromCall.Args) == 0 {
 			return InferRule{}, false
 		}
 		if !isInferIdent(fromSel.X, inferAlias) {
 			return InferRule{}, false
 		}
-		given, ok := resolvePredicate(inner.Args[0], imp, importPath)
+		contexts, ok := resolvePredicates(inner.Args, imp, importPath, diags, fset, "context of infer.Given")
 		if !ok {
-			reportBadPredicate(diags, fset, inner.Args[0], "context of infer.Given")
 			return InferRule{}, false
 		}
-		premise, ok := resolvePredicate(fromCall.Args[0], imp, importPath)
+		premises, ok := resolvePredicates(fromCall.Args, imp, importPath, diags, fset, "premise of infer.From")
 		if !ok {
-			reportBadPredicate(diags, fset, fromCall.Args[0], "premise of infer.From")
 			return InferRule{}, false
 		}
-		return InferRule{From: premise, Given: &given, To: conclusion}, true
+		return InferRule{From: premises, Given: contexts, To: conclusions}, true
 	}
 	return InferRule{}, false
+}
+
+// resolvePredicates resolves every arg as a Predicate. If any arg
+// fails, each failure emits a strict-mode diagnostic and the whole
+// slot is reported as failed so the enclosing rule is dropped (a
+// rule with a partially-unresolved slot would quietly change
+// semantics, which is exactly what strict mode rejects).
+func resolvePredicates(args []ast.Expr, imp *importInfo, importPath string, diags *[]Diagnostic, fset *token.FileSet, role string) ([]Predicate, bool) {
+	out := make([]Predicate, 0, len(args))
+	anyBad := false
+	for _, a := range args {
+		p, ok := resolvePredicate(a, imp, importPath)
+		if !ok {
+			reportBadPredicate(diags, fset, a, role)
+			anyBad = true
+			continue
+		}
+		out = append(out, p)
+	}
+	if anyBad {
+		return nil, false
+	}
+	return out, true
 }
 
 // reportBadPredicate appends a strict-mode diagnostic pointing at

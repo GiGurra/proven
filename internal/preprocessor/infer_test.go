@@ -22,10 +22,10 @@ var _ = infer.From(isSmallPositive).To(isPositive)
 		t.Fatalf("want 1 rule, got %d: %v", len(sum.Rules), sum.Rules)
 	}
 	r := sum.Rules[0]
-	if r.From.Name != "isSmallPositive" || r.To.Name != "isPositive" {
+	if onlyName(r.From) != "isSmallPositive" || onlyName(r.To) != "isPositive" {
 		t.Errorf("rule shape wrong: %+v", r)
 	}
-	if r.Given != nil {
+	if len(r.Given) != 0 {
 		t.Errorf("expected no Given, got %v", r.Given)
 	}
 }
@@ -46,10 +46,10 @@ var _ = infer.From(isEven).Given(isGreaterThanZero).To(isPositive)
 		t.Fatalf("want 1 rule, got %d", len(sum.Rules))
 	}
 	r := sum.Rules[0]
-	if r.From.Name != "isEven" || r.To.Name != "isPositive" {
+	if onlyName(r.From) != "isEven" || onlyName(r.To) != "isPositive" {
 		t.Errorf("rule shape wrong: %+v", r)
 	}
-	if r.Given == nil || r.Given.Name != "isGreaterThanZero" {
+	if onlyName(r.Given) != "isGreaterThanZero" {
 		t.Errorf("Given predicate missing/wrong: %v", r.Given)
 	}
 }
@@ -71,12 +71,32 @@ var _ = infer.From(isLocalSmall).To(preds.IsBounded)
 		t.Fatalf("want 1 rule, got %d", len(sum.Rules))
 	}
 	r := sum.Rules[0]
-	if r.From != (Predicate{Pkg: pkgPath, Name: "isLocalSmall"}) {
+	if only(r.From) != (Predicate{Pkg: pkgPath, Name: "isLocalSmall"}) {
 		t.Errorf("From wrong: %+v", r.From)
 	}
-	if r.To != (Predicate{Pkg: "example.com/preds", Name: "IsBounded"}) {
+	if only(r.To) != (Predicate{Pkg: "example.com/preds", Name: "IsBounded"}) {
 		t.Errorf("To wrong: %+v", r.To)
 	}
+}
+
+// onlyName returns the single predicate name out of a scalar-slot
+// slice, empty string if the slot is not exactly one predicate. Used
+// by tests that predate the variadic slot API and expect one
+// predicate per slot.
+func onlyName(ps []Predicate) string {
+	if len(ps) != 1 {
+		return ""
+	}
+	return ps[0].Name
+}
+
+// only returns the single Predicate out of a scalar-slot slice, the
+// zero Predicate if the slot is not exactly one predicate.
+func only(ps []Predicate) Predicate {
+	if len(ps) != 1 {
+		return Predicate{}
+	}
+	return ps[0]
 }
 
 func TestScan_InferRule_MultipleRules(t *testing.T) {

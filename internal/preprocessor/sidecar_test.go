@@ -17,7 +17,6 @@ import (
 // dropping fields and downstream discharge decisions are being
 // made against a lossy copy.
 func TestSummaryRoundtripJSON(t *testing.T) {
-	given := Predicate{Pkg: "example.com/ex", Name: "isGreaterThanZero"}
 	orig := &PackageSummary{
 		ImportPath: "example.com/ex",
 		Funcs: map[string]*FuncSummary{
@@ -38,13 +37,19 @@ func TestSummaryRoundtripJSON(t *testing.T) {
 		},
 		Rules: []InferRule{
 			{
-				From: Predicate{Pkg: "example.com/ex", Name: "isEven"},
-				To:   Predicate{Pkg: "example.com/ex", Name: "isPositive"},
+				From: []Predicate{{Pkg: "example.com/ex", Name: "isEven"}},
+				To:   []Predicate{{Pkg: "example.com/ex", Name: "isPositive"}},
 			},
 			{
-				From:  Predicate{Pkg: "example.com/ex", Name: "isSmallPositive"},
-				Given: &given,
-				To:    Predicate{Pkg: "example.com/ex", Name: "isPositive"},
+				From: []Predicate{
+					{Pkg: "example.com/ex", Name: "isSmallPositive"},
+					{Pkg: "example.com/ex", Name: "isEven"},
+				},
+				Given: []Predicate{{Pkg: "example.com/ex", Name: "isGreaterThanZero"}},
+				To: []Predicate{
+					{Pkg: "example.com/ex", Name: "isPositive"},
+					{Pkg: "example.com/ex", Name: "isNonNeg"},
+				},
 			},
 		},
 	}

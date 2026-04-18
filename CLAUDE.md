@@ -13,9 +13,12 @@
 ```go
 var _ = infer.From(isSmallPositive).To(isPositive)
 var _ = infer.From(isEven).Given(isGreaterThanZero).To(isPositive)
+
+// Every slot is variadic and AND-composes, same as proven.That.
+var _ = infer.From(isEven, isPositive).To(isNonNeg, isNonZero)
 ```
 
-Rules are trusted — no symbolic verification. A future `infertest.Verify` would property-test them.
+Rules are trusted — no symbolic verification. `infertest.Verify` / `VerifyApplies` (implemented) property-test them against sample inputs.
 
 ## Authoritative docs
 

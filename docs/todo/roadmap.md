@@ -6,7 +6,7 @@ This is the resume-point for preprocessor work: what's done, what's next, and wh
 
 **Done.**
 - Package scaffolding: `pkg/proven`, `pkg/proventest`, `pkg/prove`, `pkg/infer`.
-- Runtime APIs: `That`, `Returns`, `And` / `Or` / `Not`, `Violation`, `PredicateName`, `WithChecks`, `AssertFails`, `AssertAnyFailure`, `prove.That`, `prove.Must`, `infer.From(...).Given(...).To(...)`.
+- Runtime APIs: `That`, `Returns`, `And` / `Or` / `Not`, `Violation`, `PredicateName`, `WithChecks`, `AssertFails`, `AssertAnyFailure`, `prove.That`, `prove.Must`, `infer.From(...).Given(...).To(...)` (every slot variadic, AND-composed).
 - Linker gate: `atCompileTime` declared via `//go:linkname` to the unresolved `_proven_atCompileTime` symbol.
 - `cmd/proven/`: toolexec shim; all logic in `internal/preprocessor/`.
 - `internal/preprocessor/`: AST-based preprocessor (`run.go` / `compile.go` / `provenstub.go`) + unit tests + golden-file e2e harness (`e2e_test.go`) running the real Go toolchain on fixtures under `testdata/cases/`, with an isolated `GOCACHE` per test run.
@@ -95,7 +95,7 @@ Design threads the phase has to cover:
 - **Analyzer discharge.** A fact `Fact{Pred: And(a, b), Var: x}` established at a guard must discharge an obligation demanding `And(a, b)`. Options: (a) store combinator facts as-is and match structurally at discharge time, or (b) decompose a successful `if And(a, b)(x)` guard into two facts `Fact{a, x}` + `Fact{b, x}` and let existing leaf-level discharge handle it (only sound for `And`, not `Or` — `Or` is genuinely harder and needs a disjunctive fact representation). Starting with (b) for `And` + `Not` and deferring `Or`-as-obligation to v2 is the likely pragmatic cut.
 - **Sidecar.** Cross-package discharge needs the combinator shape in JSON. The `Predicate` slot in `PackageSummary.Funcs[].Params[]` becomes a `PredicateExpr`. Straightforward schema extension; breaks sidecar compatibility with Phase 6 output, so bump the sidecar version.
 - **Rewriter.** No change — erasure is still by span, and the combinator call inside `proven.That(...)` is part of the wrapper span being blanked.
-- **infer rules.** `infer.From(...).To(...)` slots currently take named predicates only. Once Phase 11a lands at the scanner, `From(proven.And(a, b))` falls out naturally — the existing strict-mode error "argument to infer.From must be a named function" would need to recognize combinator trees too.
+- **infer rules.** `infer.From(...).To(...)` slots are already variadic and AND-compose named predicates. Once Phase 11a lands at the scanner, `From(proven.And(a, b))` — where the argument is itself a combinator tree — falls out naturally: the strict-mode error "argument to infer.From must be a named function" would need to recognize combinator trees too, same as the proven.That / prove.That sites.
 
 Expected shape after the phase:
 

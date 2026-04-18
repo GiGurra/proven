@@ -38,7 +38,7 @@ Tests can opt into running the block at runtime for wiring verification. `proven
 
 - `pkg/proven/` — the public API: `That`, `Returns`, `And`, `Or`, `Not`. Plus `Violation` (panic value under `proventest.WithChecks`) and `PredicateName` (runtime function name resolution for diagnostics).
 - `pkg/proventest/` — test-only support: supplies the `_proven_atCompileTime` symbol so test binaries link without the preprocessor, and exposes `WithChecks`, `AssertFails`, `AssertAnyFailure` for opt-in runtime verification. Never imported from production code.
-- `pkg/infer/` — fluent builder for declaring predicate implication rules. `infer.From(p).To(q)` (unconditional) or `infer.From(p).Given(c).To(q)` (conditional). Consumed by the preprocessor to discharge obligations by subsumption.
+- `pkg/infer/` — fluent builder for declaring predicate implication rules. `infer.From(p...).To(q...)` (unconditional) or `infer.From(p...).Given(c...).To(q...)` (conditional). Every slot is variadic and AND-composes, same as `proven.That` / `prove.That` / `trust.That`. Consumed by the preprocessor to discharge obligations by subsumption.
 
 ## The API surface
 
