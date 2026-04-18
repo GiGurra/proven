@@ -22,6 +22,7 @@ Rules are trusted — no symbolic verification. A future `infertest.Verify` woul
 - [`docs/design.md`](docs/design.md) — the current authoritative design. Read this first.
 - [`docs/companion-packages.md`](docs/companion-packages.md) — the three-package vision: `proven` (compile-time contracts), `prove` (runtime boundary validation, `That`/`Must` implemented), `infer` (inference rules implemented; comptime `Const` future).
 - [`docs/todo/roadmap.md`](docs/todo/roadmap.md) — **the resume-point for preprocessor work.** Where we are, which phases remain, what each phase looks like, open risks, and a "how to resume" checklist. Read before picking up preprocessor implementation.
+- [`docs/go-language-findings.md`](docs/go-language-findings.md) — empirical Go-1.26 facts the design depends on (generic inference limits, type-parameter restrictions on alias/named-type RHS, `//go:linkname`-to-unresolved-symbol behavior). Revisit if Go changes.
 - [`docs/concept.md`](docs/concept.md) — original motivation. API names are partially out of date (see design.md / companion-packages.md) but preprocessor architecture and motivation still apply.
 
 ## Background reading (historical / superseded)
@@ -50,3 +51,18 @@ Earlier design iterations. Do not build on these; retained to explain why the cu
 - Multiple predicates in a `That` / `Returns` call are AND-composed (variadic). For OR or first-class predicate values, use `And` / `Or` / `Not`.
 - Runtime behavior of `That` / `Returns` is only observable via `proventest.WithChecks` in test code. Production runs never reach the block body: either the preprocessor erased it, or the link failed.
 - The preprocessor's job is narrow: scan bodies for `That` / `Returns`, build per-function obligation summaries, discharge them at call sites via flow analysis using `infer` rules as implication axioms, erase on success, fail on unproven. No type-level algebra, no SMT.
+
+## Keep the docs fresh
+
+**Standing directive.** After every significant change — a new or renamed API, a new package, a completed or reshuffled roadmap phase, a new convention, a design reconsideration, or deletion of code that held important context — update the persisted docs **in the same commit**. The goal: a cold-state reader (no conversation memory) can reconstruct the project state and pick up the next task without re-deriving decisions.
+
+Files to scan after each change; update whichever are affected:
+
+- `README.md` — if the user-facing surface, example, or "How it works" section changes.
+- `CLAUDE.md` — this file. "Current implementation state" list, conventions, standing directives.
+- `docs/design.md` — if the authoritative design shifts or gains new clauses.
+- `docs/companion-packages.md` — the per-package status/intent table.
+- `docs/todo/roadmap.md` — move completed phases to "Done"; refine upcoming phases as their shape becomes clearer.
+- `docs/go-language-findings.md` — if an empirical Go-language fact we rely on changes, or we discover a new one.
+
+If a commit deletes code or infrastructure that held context (e.g. experiment packages), **the context it captured must move into a persistent doc in the same commit**. "It lived in that deleted file" is not a valid resume-point.
