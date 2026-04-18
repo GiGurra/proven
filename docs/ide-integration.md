@@ -1,11 +1,12 @@
 # IDE integration
 
-> **Status: largely superseded.** This document analyzed the IDE tension
-> created by the `Refined[P, T]` design. The pivot to interface-based
-> signatures (see [`design.md`](design.md)) eliminates the tension:
-> `gopls` handles structural subsumption natively, no companion LSP or
-> `Weaken` casts are required, and call sites look like plain Go. This
-> file is kept as reference for the fallback path.
+> **Status: superseded.** This document analyzed the IDE tension
+> created by the `Refined[P, T]` design. That tension (and this
+> document's analysis of it) drove the pivot to the final
+> `proven.That` / `proven.Returns` design in [`design.md`](design.md):
+> signatures are plain Go, type-checking is always green, and a
+> link-time gate via `atCompileTime` is what catches missing-preprocessor
+> builds. This file is kept as a record of the decision.
 
 ---
 

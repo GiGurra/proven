@@ -1,4 +1,4 @@
-# Design: runtime-degrading contracts, statically discharged
+# Design: compile-time contracts with a link-time gate
 
 This is the authoritative design for proven. Earlier design iterations — generic wrapper types (`Refined[P, T]`), struct embedding (the (C) approach), interface-based signatures (the structural approach), and non-generic type aliases — were explored and rejected in favor of this one. Each is documented separately and marked superseded.
 
@@ -32,12 +32,13 @@ The package's execution model is shaped by one strict goal: **the IDE experience
 
 Inside an `atCompileTime` block, the code is material the preprocessor reads. In production builds the block never executes — the preprocessor has either erased the call site or substituted a compile error. In the default test configuration (via `proventest` — see below) the block is also a no-op, so runtime cost is zero.
 
-Tests can opt into running the block at runtime for wiring verification. `proventest.WithChecks(fn)` flips a flag for the duration of `fn`; inside that window, each `atCompileTime` block actually executes its closure, and a failing predicate panics. This lets tests assert "passing a negative amount to `Transfer` really does trip the precondition", catching drift between assertion and implementation without needing the preprocessor to be built yet.
+Tests can opt into running the block at runtime for wiring verification. `proventest.WithChecks(fn)` flips a flag for the duration of `fn`; inside that window, each `atCompileTime` block actually executes its closure, and a failing predicate panics with a `proven.Violation` naming the failing predicate. The high-level helper `proventest.AssertFails(t, pred, fn)` runs `fn` under `WithChecks` and asserts that a specific predicate is what fires — catching drift between the assertion and the implementation without needing the preprocessor to be built yet.
 
 ## Package layout
 
-- `pkg/proven/` — the public API: `That`, `Returns`, `And`, `Or`, `Not`.
-- `pkg/proventest/` — test-only support: supplies the `_proven_atCompileTime` symbol (so test binaries link without the preprocessor) and exposes `WithChecks(fn func())` for opt-in runtime verification. Never imported from production code.
+- `pkg/proven/` — the public API: `That`, `Returns`, `And`, `Or`, `Not`. Plus `Violation` (panic value under `proventest.WithChecks`) and `PredicateName` (runtime function name resolution for diagnostics).
+- `pkg/proventest/` — test-only support: supplies the `_proven_atCompileTime` symbol so test binaries link without the preprocessor, and exposes `WithChecks`, `AssertFails`, `AssertAnyFailure` for opt-in runtime verification. Never imported from production code.
+- `pkg/infer/` — fluent builder for declaring predicate implication rules. `infer.From(p).To(q)` (unconditional) or `infer.From(p).Given(c).To(q)` (conditional). Consumed by the preprocessor to discharge obligations by subsumption.
 
 ## The API surface
 
@@ -71,12 +72,13 @@ The preprocessor accepts these discharge patterns in the caller:
 - **Early-return guard.** `if !isPositive(x) { return }; Transfer(x, ...)` — after the guarded return, `isPositive(x)` is established.
 - **Conjoined guards.** `if isPositive(x) && x < 100 { ... }` — both clauses become facts in the then-branch.
 - **Flow from `Returns`.** Result of a function whose body declares `proven.Returns(v, isPositive)` flows into a matching `That` check without re-proof.
+- **Declared implication.** When the caller has established predicate `P` and the callee requires `Q`, the preprocessor discharges `Q` if the module declares `infer.From(P).To(Q)` (optionally with `.Given(ctx)`). Implications are trusted — no symbolic verification.
 - **Explicit trust (planned).** A future `proven.Trust(x, pred)` variant accepts the obligation as a deliberate runtime guard — useful at boundaries (deserialization, HTTP handlers) where static proof is impossible.
 
 Patterns not supported in v1:
 - Interprocedural flow into arbitrary helper functions.
 - Proof through complex argument expressions (`That(transform(x), p)` is v2).
-- Proofs that require SMT — inequalities chained transitively, user-declared predicate implications, etc.
+- Symbolic predicate reasoning beyond declared `infer` rules (full SMT remains out of scope).
 
 ## Why this design over the alternatives
 
@@ -110,11 +112,12 @@ Mitigations:
 ## What the preprocessor actually does
 
 1. **Scan bodies for `proven.That` and `proven.Returns`.** Build a per-function summary: parameters each have a list of predicate functions that must hold; returns may be annotated with postcondition predicates.
-2. **Flow-sensitive analysis in each caller.** Collect facts from conditionals, guards, prior `Returns` postconditions, and literal evaluation. For each call to an annotated function, discharge every predicate on every corresponding argument.
-3. **Emit or fail.** When all obligations discharge, rewrite the callee's body (for this build) to erase the `That`/`Returns` calls. When they don't, fail the build with a diagnostic naming the unproven predicate and the call site.
-4. **`Const` evaluation.** Compute pure expressions at build time and substitute literals. Orthogonal to the contract story but part of the same preprocessor pipeline.
+2. **Scan for `infer.From(...).To(...)` declarations.** Populate an implication graph: `P ⇒ Q` (optionally under context `C`).
+3. **Flow-sensitive analysis in each caller.** Collect facts from conditionals, guards, prior `Returns` postconditions, and literal evaluation. For each call to an annotated function, discharge every predicate on every corresponding argument, using implication-graph walks when a direct match fails.
+4. **Emit or fail.** When all obligations discharge, rewrite the callee's body for this build to erase the `That` / `Returns` calls. When they don't, fail the build with a diagnostic naming the unproven predicate and the call site.
+5. **`Const` evaluation (future).** `infer.Const(expr)` computes pure expressions at build time and substitutes literals. Orthogonal to the contract story, part of the same preprocessor pipeline when it lands.
 
-No proof-expression subsumption, no marker-interface synthesis, no wrapper-type generation, no phantom-parameter tricks.
+No marker-interface synthesis, no wrapper-type generation, no phantom-parameter tricks. The implication graph from step 2 is the only subsumption-like machinery, and it is purely structural — a set of declared-and-trusted implications, not a solver.
 
 ## Open questions
 
@@ -126,7 +129,8 @@ No proof-expression subsumption, no marker-interface synthesis, no wrapper-type 
 
 ## What's next
 
-1. `pkg/proven/proven.go` already carries the runtime-checkable `That` / `Returns` / `And` / `Or` / `Not` implementations.
-2. `example/basic/` demonstrates the pattern end-to-end.
-3. The preprocessor skeleton is still to build: toolexec entry, per-package scan, flow analyzer, diagnostic emission. The scan step can follow rewire's shape closely.
-4. The `internal/*experiment` packages stay as regression documents for the Go-language behavior each rejected design relied on.
+1. `pkg/proven/proven.go` carries the runtime-checkable `That` / `Returns` / `And` / `Or` / `Not` plus the `atCompileTime` linker gate.
+2. `pkg/proventest/` provides the linker stub for test binaries and the `WithChecks` / `AssertFails` helpers.
+3. `pkg/infer/infer.go` provides the fluent inference-rule builder.
+4. `example/basic/` demonstrates the pattern end-to-end with `TestWiring_*` tests verifying the assertions are wired correctly.
+5. **Preprocessor is next.** Toolexec entry, per-package scan (functions with `That` / `Returns` + `infer.From(...).To(...)` declarations), flow-sensitive analyzer with implication-graph lookup, AST rewriter that erases discharged calls and supplies the `_proven_atCompileTime` symbol, diagnostic emission. The scan and toolexec plumbing can follow `rewire`'s shape closely; flow analysis is the novel part.

@@ -1,12 +1,13 @@
 # Proof subsumption
 
-> **Status: partially superseded.** This document described proof
-> subsumption for the `Refined[P, T]` design. With the pivot to
-> interface-based signatures (see [`design.md`](design.md)), subsumption
-> is now handled natively by Go's structural typing — the preprocessor
-> does not implement the subsumption algebra described below. This file
-> is kept as reference in case we need to revisit the `Refined[P, T]`
-> fallback path for ad-hoc constraints.
+> **Status: superseded.** This document described proof-expression
+> subsumption algebra for the original `Refined[P, T]` design. The
+> current design (see [`design.md`](design.md)) handles cross-predicate
+> implication via user-declared rules in `pkg/infer`
+> (`infer.From(p).To(q)`, optionally with `.Given(context)`). Those
+> rules form a simple implication graph the preprocessor walks; there
+> is no expression-level subsumption algebra. This file is kept as
+> reference for how the problem was originally framed.
 
 ---
 

@@ -1,9 +1,12 @@
 # Parameter constraint syntax — alternatives considered
 
-> **Status: superseded.** The A+C decision recorded at the bottom of this
-> file has been overturned. The current design uses interface-based proof
-> signatures plus struct-embedded proof markers — see [`design.md`](design.md).
-> This file is kept as historical analysis of the options considered.
+> **Status: superseded.** The A+C decision recorded at the bottom of
+> this file, and the subsequent interface-based pivot, were all
+> ultimately replaced by the `proven.That` / `proven.Returns` design
+> documented in [`design.md`](design.md): signatures stay plain Go and
+> preconditions live inside the function body as runtime assertions
+> that the preprocessor discharges statically. This file is kept as
+> historical analysis of the type-level options considered.
 
 ---
 
