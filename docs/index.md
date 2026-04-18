@@ -62,11 +62,13 @@ func main() {
 
 Signatures stay plain Go. Predicates are ordinary functions. No wrapper types, no generics ceremony, no codegen. `gopls` and `go vet` see ordinary code, so the IDE is always green — but building without the preprocessor fails loudly at link time, so you cannot silently ship code that bypasses the contract system.
 
-**The point isn't more validation. It's to stop having to remember.**
+**The preconditions of every function become visible, machine-checked documentation** — executable docstrings that the compiler enforces at every call site.
 
 ## Why you might want this
 
 Systems grow. Past a certain size it becomes effectively impossible to remember what invariants were imposed where, or why. Engineers re-validate defensively, trust assumptions that have drifted, or simply forget to check. The cost is runtime bugs, redundant validation at every layer, and a maintenance burden that scales faster than the codebase.
+
+A `proven.That(x, isPositive)` at the top of a function body does two jobs at once. It's **documentation** the reader can't miss — the function's requirements live in its body, not in a comment that may have drifted from reality. And it's a **check** the compiler runs at every call site, at build time, at zero runtime cost once discharged. A predicate written once is enforced everywhere the function is called, for as long as it stays declared.
 
 Proven shifts that burden onto the compiler. A function declares once what must hold; the preprocessor proves it at every call site. If the proof succeeds, nothing runs at runtime. If any path can't be proved, the build fails with a diagnostic pointing at the offending call site.
 

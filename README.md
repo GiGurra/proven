@@ -68,7 +68,7 @@ func main() {
 
 Signatures stay plain Go. Predicates are ordinary `func(T) bool`. No wrapper types, no generics ceremony, no struct decorations, no codegen. `gopls` and `go vet` see ordinary code, so IDE checking stays green — but building without the preprocessor fails loudly at link time, so you cannot silently ship code that bypasses the contract system.
 
-**The point isn't more validation. It's to stop having to remember.** Systems grow, defensive re-validation accretes at every layer, and nobody remembers why a particular check was ever needed. `proven` shifts the remembering onto the compiler: a function declares once what must hold, the preprocessor proves it at build time, discharged obligations are erased, and un-discharged ones fail the build.
+**The preconditions of every function become visible, machine-checked documentation.** A `proven.That(x, isPositive)` at the top of a function body reads as executable docstring — a future reader sees exactly what the function expects, and the compiler enforces it at every call site. The two failure modes of requirement-tracking collapse into one: nobody forgets what a parameter requires, because the requirement is right there in the code; nobody defensively re-validates "just in case," because a discharged obligation erases to zero runtime cost. The library's job is to let you always declare what must hold, without ever paying for it at runtime, and without relying on a comment someone has to remember to update.
 
 ## Quick start
 
