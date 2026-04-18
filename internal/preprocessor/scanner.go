@@ -56,19 +56,24 @@ type Predicate struct {
 // declared in one function body.
 //
 // ParamPreds: parameter position (0-based) to the AND-composed
-// list of predicates asserted on that parameter by every
-// proven.That call in the body. An entry is present only if at
-// least one such call exists; absent parameters carry no
-// obligations.
+// list of leaf-predicate obligations asserted on that parameter by
+// every proven.That call in the body. proven.And(a, b) and its
+// nested forms flatten into additional leaves here. An entry is
+// present only if at least one such call exists; absent parameters
+// carry no obligations.
 //
-// ReturnPreds: predicates collected across every proven.Returns
-// call in the body. Phase 2 treats these as a bag because tracking
-// "which return value position is constrained" would require flow
-// analysis over the body, which is Phase 3's job. A function that
-// uses proven.Returns in one return statement and not another is
-// represented by a single combined list; the ambiguity is
-// acceptable at this level because Phase 3 will re-walk the body
-// with call-site context anyway.
+// ParamOrs: parameter position to the AND-composed list of
+// disjunctive obligations, each inner []Predicate representing one
+// proven.Or(a, b) call's OR-alternatives (the Or's arguments must
+// be named leaves — nested combinators inside Or are rejected by
+// strict mode). Any leaf holding, or an exact-match Or-fact, is
+// enough to discharge one disjunction.
+//
+// ReturnPreds / ReturnOrs: the postcondition counterparts, merged
+// across every proven.Returns / trust.Returns call in the body.
+// Phase 2 treats these as bags because tracking "which return
+// value position is constrained" would require flow analysis over
+// the body, which is Phase 3's job.
 //
 // Recv is the receiver type identifier for methods (without the
 // leading star), empty for free functions.
@@ -76,7 +81,9 @@ type FuncSummary struct {
 	Name        string
 	Recv        string
 	ParamPreds  map[int][]Predicate
+	ParamOrs    map[int][][]Predicate
 	ReturnPreds []Predicate
+	ReturnOrs   [][]Predicate
 }
 
 // Key returns a stable identifier for looking up the summary from
@@ -290,12 +297,23 @@ func extractInferRule(expr ast.Expr, inferAlias string, imp *importInfo, importP
 // so the enclosing rule is dropped (a rule with a partially-resolved
 // slot would quietly change semantics, which is exactly what strict
 // mode rejects).
+//
+// Disjunctive obligations (proven.Or(...)) are NOT accepted in infer
+// slots — a rule like "a OR b implies c" means two independent rules
+// in flat terms, and splitting them at the scanner would obscure the
+// declared shape. An Or here is rejected with a dedicated message
+// pointing the user at declaring one rule per disjunct.
 func resolvePredicates(args []ast.Expr, imp *importInfo, importPath string, diags *[]Diagnostic, fset *token.FileSet, role string) ([]Predicate, bool) {
 	out := make([]Predicate, 0, len(args))
 	anyBad := false
 	for _, a := range args {
-		leaves, ok := resolveAndFlat(a, imp, importPath, fset, diags, role)
+		leaves, ors, ok := resolveAndFlat(a, imp, importPath, fset, diags, role)
 		if !ok {
+			anyBad = true
+			continue
+		}
+		if len(ors) > 0 {
+			reportOrNotAcceptedInInfer(diags, fset, a, role)
 			anyBad = true
 			continue
 		}
@@ -305,6 +323,27 @@ func resolvePredicates(args []ast.Expr, imp *importInfo, importPath string, diag
 		return nil, false
 	}
 	return out, true
+}
+
+// reportOrNotAcceptedInInfer rejects a proven.Or appearing inside an
+// infer.From / infer.Given / infer.To slot. A disjunction at a slot
+// would synthesize multiple rules (one per branch) or need a
+// disjunctive obligation/premise shape we do not carry on Rule yet;
+// both are v2 scope.
+func reportOrNotAcceptedInInfer(diags *[]Diagnostic, fset *token.FileSet, expr ast.Expr, role string) {
+	if diags == nil || fset == nil {
+		return
+	}
+	pos := fset.Position(expr.Pos())
+	*diags = append(*diags, Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg: fmt.Sprintf(
+			"proven: proven.Or is not accepted at %s — declare one rule per disjunct instead (infer.From(a).To(target) plus infer.From(b).To(target))",
+			role,
+		),
+	})
 }
 
 // reportBadPredicate appends a strict-mode diagnostic pointing at
@@ -487,11 +526,17 @@ func recordThat(s *FuncSummary, paramIdx map[string]int, call *ast.CallExpr, imp
 		return
 	}
 	for _, arg := range call.Args[1:] {
-		leaves, ok := resolveAndFlat(arg, imp, importPath, fset, diags, "argument to proven.That")
+		leaves, ors, ok := resolveAndFlat(arg, imp, importPath, fset, diags, "argument to proven.That")
 		if !ok {
 			continue
 		}
 		s.ParamPreds[idx] = append(s.ParamPreds[idx], leaves...)
+		if len(ors) > 0 {
+			if s.ParamOrs == nil {
+				s.ParamOrs = make(map[int][][]Predicate)
+			}
+			s.ParamOrs[idx] = append(s.ParamOrs[idx], ors...)
+		}
 	}
 }
 
@@ -508,11 +553,12 @@ func recordReturns(s *FuncSummary, call *ast.CallExpr, imp *importInfo, importPa
 		return
 	}
 	for _, arg := range call.Args[1:] {
-		leaves, ok := resolveAndFlat(arg, imp, importPath, fset, diags, "argument to proven.Returns")
+		leaves, ors, ok := resolveAndFlat(arg, imp, importPath, fset, diags, "argument to proven.Returns")
 		if !ok {
 			continue
 		}
 		s.ReturnPreds = append(s.ReturnPreds, leaves...)
+		s.ReturnOrs = append(s.ReturnOrs, ors...)
 	}
 }
 
@@ -541,76 +587,123 @@ func resolvePredicate(expr ast.Expr, imp *importInfo, importPath string) (Predic
 	return Predicate{}, false
 }
 
-// resolveAndFlat is the obligation-site resolver: it accepts
-// everything resolvePredicate does AND inline proven.And(...) calls,
-// whose arguments recurse through this function and whose leaf
-// predicates concatenate into one flat []Predicate. This treats
-// proven.That(x, proven.And(a, b)) as equivalent to proven.That(x, a, b)
-// — the analyzer never sees an And obligation; it sees the leaf
-// obligations.
+// resolveAndFlat is the obligation- and fact-site resolver. It
+// accepts everything resolvePredicate does PLUS inline combinator
+// calls under two rules:
 //
-// Rejection behavior:
-//   - proven.Or / proven.Not at obligation sites emit a dedicated
-//     diagnostic and return (_, false): disjunctive and negated
-//     obligations are v2 scope (they need a disjunctive / negation
-//     fact representation in the analyzer).
-//   - Function literals, arbitrary call expressions, and anything
-//     else emit the standard "must be a named function" diagnostic.
+//   - proven.And(...): arguments recurse through this function and
+//     each resolved leaf / disjunction is concatenated. Nested And
+//     flattens fully. proven.That(x, proven.And(a, b)) is stored as
+//     two leaf obligations, identical to proven.That(x, a, b).
+//   - proven.Or(...): arguments must each resolve to a single named
+//     leaf — nested combinators inside Or are rejected by strict
+//     mode. The whole Or becomes one entry in the returned `ors`
+//     slice, representing a disjunctive obligation / fact that any
+//     one alternative holding discharges.
 //
-// Any inner failure emits exactly one diagnostic at the innermost
-// problem node so the message points at the right token. The top-
-// level caller should NOT re-report — resolveAndFlat owns reporting
-// for obligation sites.
+// proven.Not is still rejected (it would need a negation-fact
+// representation). Function literals and other unnamed values are
+// still rejected. Any inner failure emits exactly one diagnostic at
+// the innermost failing node.
 //
-// A degenerate proven.And() (zero arguments) successfully returns an
-// empty leaf slice — an AND of nothing is trivially true, so there
-// are simply no obligations to add. Callers handle this as "no
-// leaves to append".
-func resolveAndFlat(expr ast.Expr, imp *importInfo, importPath string, fset *token.FileSet, diags *[]Diagnostic, role string) ([]Predicate, bool) {
+// A degenerate proven.And() returns (nil, nil, true) — an AND of
+// nothing is trivially true. proven.Or() with zero arguments is
+// false and hence unsatisfiable; the scanner rejects it rather than
+// silently storing an empty disjunction the caller can never
+// discharge.
+func resolveAndFlat(expr ast.Expr, imp *importInfo, importPath string, fset *token.FileSet, diags *[]Diagnostic, role string) (leaves []Predicate, ors [][]Predicate, ok bool) {
 	switch e := expr.(type) {
 	case *ast.Ident:
-		return []Predicate{{Pkg: importPath, Name: e.Name}}, true
+		return []Predicate{{Pkg: importPath, Name: e.Name}}, nil, true
 	case *ast.SelectorExpr:
-		x, ok := e.X.(*ast.Ident)
+		leaf, ok := selectorLeaf(e, imp)
 		if !ok {
 			reportBadPredicate(diags, fset, expr, role)
-			return nil, false
+			return nil, nil, false
 		}
-		pkg, ok := imp.aliases[x.Name]
-		if !ok {
-			reportBadPredicate(diags, fset, expr, role)
-			return nil, false
-		}
-		return []Predicate{{Pkg: pkg, Name: e.Sel.Name}}, true
+		return []Predicate{leaf}, nil, true
 	case *ast.CallExpr:
-		op, ok := provenCombinator(e, imp.provenAlias)
-		if !ok {
+		op, isCombinator := provenCombinator(e, imp.provenAlias)
+		if !isCombinator {
 			reportBadPredicate(diags, fset, expr, role)
-			return nil, false
+			return nil, nil, false
 		}
 		switch op {
 		case "And":
-			out := make([]Predicate, 0, len(e.Args))
+			outLeaves := make([]Predicate, 0, len(e.Args))
+			var outOrs [][]Predicate
 			anyBad := false
 			for _, arg := range e.Args {
-				leaves, ok := resolveAndFlat(arg, imp, importPath, fset, diags, role)
+				subLeaves, subOrs, ok := resolveAndFlat(arg, imp, importPath, fset, diags, role)
 				if !ok {
 					anyBad = true
 					continue
 				}
-				out = append(out, leaves...)
+				outLeaves = append(outLeaves, subLeaves...)
+				outOrs = append(outOrs, subOrs...)
 			}
 			if anyBad {
-				return nil, false
+				return nil, nil, false
 			}
-			return out, true
-		case "Or", "Not":
+			return outLeaves, outOrs, true
+		case "Or":
+			if len(e.Args) == 0 {
+				reportEmptyOr(diags, fset, expr, role)
+				return nil, nil, false
+			}
+			alts := make([]Predicate, 0, len(e.Args))
+			anyBad := false
+			for _, arg := range e.Args {
+				leaf, ok := resolveLeafOnly(arg, imp, importPath, fset, diags, role)
+				if !ok {
+					anyBad = true
+					continue
+				}
+				alts = append(alts, leaf)
+			}
+			if anyBad {
+				return nil, nil, false
+			}
+			return nil, [][]Predicate{alts}, true
+		case "Not":
 			reportUnsupportedCombinator(diags, fset, expr, role, op)
-			return nil, false
+			return nil, nil, false
 		}
 	}
 	reportBadPredicate(diags, fset, expr, role)
-	return nil, false
+	return nil, nil, false
+}
+
+// resolveLeafOnly accepts only a named leaf — Ident or pkg.Name
+// selector. Used for proven.Or's arguments: nested combinators
+// inside Or are v2 scope, so the scanner rejects them with the
+// standard "must be a named function" diagnostic plus an Or-specific
+// hint.
+func resolveLeafOnly(expr ast.Expr, imp *importInfo, importPath string, fset *token.FileSet, diags *[]Diagnostic, role string) (Predicate, bool) {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return Predicate{Pkg: importPath, Name: e.Name}, true
+	case *ast.SelectorExpr:
+		return selectorLeaf(e, imp)
+	}
+	reportOrArgNotLeaf(diags, fset, expr, role)
+	return Predicate{}, false
+}
+
+// selectorLeaf resolves a pkg.Name selector to its Predicate
+// identity, using the file's import-alias map to find the package
+// path. Returns (_, false) if the selector's receiver is not an
+// ident or that ident does not resolve to an imported package.
+func selectorLeaf(e *ast.SelectorExpr, imp *importInfo) (Predicate, bool) {
+	x, ok := e.X.(*ast.Ident)
+	if !ok {
+		return Predicate{}, false
+	}
+	pkg, ok := imp.aliases[x.Name]
+	if !ok {
+		return Predicate{}, false
+	}
+	return Predicate{Pkg: pkg, Name: e.Sel.Name}, true
 }
 
 // provenCombinator reports whether call is a <provenAlias>.<Op>(...)
@@ -636,11 +729,10 @@ func provenCombinator(call *ast.CallExpr, provenAlias string) (string, bool) {
 }
 
 // reportUnsupportedCombinator emits a strict-mode diagnostic for a
-// proven.Or / proven.Not call appearing at an obligation site. Only
-// proven.And is accepted (it decomposes into leaf obligations);
-// disjunctive and negated obligations are v2 scope and fail the
-// build with an explicit message so the user knows the cut and can
-// route around it via inference rules if they need the effect.
+// proven.Not call appearing at an obligation or fact site. proven.And
+// and proven.Or are accepted (And decomposes into leaf obligations,
+// Or becomes a disjunctive obligation/fact); Not is v2 scope and
+// fails the build with an explicit message so the user knows the cut.
 func reportUnsupportedCombinator(diags *[]Diagnostic, fset *token.FileSet, expr ast.Expr, role, op string) {
 	if diags == nil || fset == nil {
 		return
@@ -651,8 +743,49 @@ func reportUnsupportedCombinator(diags *[]Diagnostic, fset *token.FileSet, expr 
 		Line: pos.Line,
 		Col:  pos.Column,
 		Msg: fmt.Sprintf(
-			"proven: inline proven.%s at %s is not supported (only proven.And decomposes at obligation sites) — express disjunction via inference rules, one per branch",
+			"proven: inline proven.%s at %s is not yet supported (proven.And and proven.Or are — Not needs a negation-fact representation the analyzer does not yet carry)",
 			op, role,
+		),
+	})
+}
+
+// reportEmptyOr rejects proven.Or() with zero arguments. Semantically
+// it is false and hence unsatisfiable; silently storing it as an empty
+// disjunction would hand the caller an obligation they can never
+// discharge, which is exactly what strict mode rejects.
+func reportEmptyOr(diags *[]Diagnostic, fset *token.FileSet, expr ast.Expr, role string) {
+	if diags == nil || fset == nil {
+		return
+	}
+	pos := fset.Position(expr.Pos())
+	*diags = append(*diags, Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg: fmt.Sprintf(
+			"proven: empty proven.Or() at %s — a disjunction with no alternatives is unsatisfiable; supply at least one named predicate",
+			role,
+		),
+	})
+}
+
+// reportOrArgNotLeaf rejects nested combinator calls (and function
+// literals, etc.) inside a proven.Or's argument list. v1 only accepts
+// proven.Or(leaf, leaf, ...) — mixing And or Or inside Or would
+// require the preprocessor to reason about DNF/CNF normalization,
+// which is v2 scope.
+func reportOrArgNotLeaf(diags *[]Diagnostic, fset *token.FileSet, expr ast.Expr, role string) {
+	if diags == nil || fset == nil {
+		return
+	}
+	pos := fset.Position(expr.Pos())
+	*diags = append(*diags, Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg: fmt.Sprintf(
+			"proven: arguments to proven.Or at %s must be named predicates — nested combinators inside Or are not supported; flatten manually or use inference rules",
+			role,
 		),
 	})
 }

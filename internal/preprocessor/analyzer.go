@@ -43,6 +43,7 @@ import (
 	"go/parser"
 	"go/token"
 	"slices"
+	"strings"
 )
 
 // proveImportPath is the runtime-boundary-validation package
@@ -63,14 +64,25 @@ type Fact struct {
 	Var  string
 }
 
-// FactSet is an unordered set of facts. The underlying map is not
-// exposed; callers use Add, Has, and Clone.
+// FactSet is an unordered set of facts. The underlying maps are not
+// exposed; callers use Add, Has, Clone, and the Or-equivalents.
+//
+// The leaf fact map stores each (Predicate, Var) pair asserted on a
+// variable at a program point. The ors map stores disjunctive facts:
+// keyed by Var, each entry is a sorted Predicate key ("pkg|name|…")
+// identifying one proven.Or(alts...) fact established on that
+// variable. A disjunctive obligation discharges iff any alt has a
+// leaf fact or matches a disjunctive fact's key structurally.
 type FactSet struct {
-	m map[Fact]struct{}
+	m   map[Fact]struct{}
+	ors map[string]map[string]struct{}
 }
 
 func newFactSet() *FactSet {
-	return &FactSet{m: make(map[Fact]struct{})}
+	return &FactSet{
+		m:   make(map[Fact]struct{}),
+		ors: make(map[string]map[string]struct{}),
+	}
 }
 
 func (fs *FactSet) Add(f Fact) { fs.m[f] = struct{}{} }
@@ -78,12 +90,62 @@ func (fs *FactSet) Has(pred Predicate, v string) bool {
 	_, ok := fs.m[Fact{Pred: pred, Var: v}]
 	return ok && v != ""
 }
+
+// AddOr records a disjunctive fact `alts-OR` on variable v. Alt
+// order is normalized so Or(a, b) and Or(b, a) collide on the same
+// key.
+func (fs *FactSet) AddOr(alts []Predicate, v string) {
+	if v == "" || len(alts) == 0 {
+		return
+	}
+	key := orKey(alts)
+	m := fs.ors[v]
+	if m == nil {
+		m = make(map[string]struct{})
+		fs.ors[v] = m
+	}
+	m[key] = struct{}{}
+}
+
+// HasOr reports whether an exact-match disjunctive fact is recorded
+// on v (same set of alts, alt order irrelevant).
+func (fs *FactSet) HasOr(alts []Predicate, v string) bool {
+	if v == "" || len(alts) == 0 {
+		return false
+	}
+	m, ok := fs.ors[v]
+	if !ok {
+		return false
+	}
+	_, ok = m[orKey(alts)]
+	return ok
+}
+
 func (fs *FactSet) Clone() *FactSet {
 	out := newFactSet()
 	for f := range fs.m {
 		out.m[f] = struct{}{}
 	}
+	for v, m := range fs.ors {
+		dup := make(map[string]struct{}, len(m))
+		for k := range m {
+			dup[k] = struct{}{}
+		}
+		out.ors[v] = dup
+	}
 	return out
+}
+
+// orKey builds a canonical comparison key for a set of Or-alts.
+// Predicates are rendered as "pkg|name" and sorted so alt order is
+// irrelevant to equality.
+func orKey(alts []Predicate) string {
+	parts := make([]string, len(alts))
+	for i, p := range alts {
+		parts[i] = p.Pkg + "|" + p.Name
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, ",")
 }
 
 // CallDischarge records the obligation-discharge status for one
@@ -105,7 +167,7 @@ type CallDischarge struct {
 // still has a missing predicate after flow analysis.
 func (c CallDischarge) Undischarged() bool {
 	for _, p := range c.Params {
-		if len(p.Missing) > 0 {
+		if len(p.Missing) > 0 || len(p.MissingOrs) > 0 {
 			return true
 		}
 	}
@@ -115,11 +177,20 @@ func (c CallDischarge) Undischarged() bool {
 // ParamDischarge records per-parameter discharge: which predicates
 // the callee required (from Phase 2's summary) and which remained
 // missing from the caller's fact set at the call site.
+//
+// RequiredOrs / MissingOrs carry the disjunctive-obligation side:
+// each entry is one proven.Or(alts...) obligation on the parameter.
+// An Or-obligation is discharged when any alt leaf holds or a
+// matching Or-fact was planted. Surfaced separately from the leaf
+// lists so diagnostics can render the whole Or at once instead of
+// emitting one complaint per disjunct.
 type ParamDischarge struct {
-	ParamIdx int
-	ArgName  string
-	Required []Predicate
-	Missing  []Predicate
+	ParamIdx    int
+	ArgName     string
+	Required    []Predicate
+	Missing     []Predicate
+	RequiredOrs [][]Predicate
+	MissingOrs  [][]Predicate
 }
 
 // AnalyzeFunc walks caller's body and returns one CallDischarge
@@ -194,6 +265,15 @@ func seedFactsFromPreconditions(caller *ast.FuncDecl, summary *PackageSummary) *
 		}
 		for _, p := range preds {
 			facts.Add(Fact{Pred: p, Var: name})
+		}
+	}
+	for idx, ors := range fsum.ParamOrs {
+		name, ok := paramNames[idx]
+		if !ok || name == "" || name == "_" {
+			continue
+		}
+		for _, alts := range ors {
+			facts.AddOr(alts, name)
 		}
 	}
 	return facts
@@ -570,15 +650,20 @@ func (a *analyzer) verifyProvenReturns(call *ast.CallExpr) {
 		// Pass nil diags — the scanner's recordReturns pass has
 		// already reported any unresolvable predicate, and we do
 		// not want to double the error. resolveAndFlat here is
-		// purely for the leaf expansion (so proven.Returns(v,
-		// proven.And(a, b)) verifies each leaf on v).
-		leaves, ok := resolveAndFlat(arg, a.imp, a.summary.ImportPath, nil, nil, "")
+		// purely for the leaf / disjunction expansion so we can
+		// verify each piece on the returned value.
+		leaves, ors, ok := resolveAndFlat(arg, a.imp, a.summary.ImportPath, nil, nil, "")
 		if !ok {
 			continue
 		}
 		for _, pred := range leaves {
 			if !a.discharged(pred, valueID.Name) {
 				reportUnprovenReturns(a.diags, a.fset, call, pred, valueID.Name, a.summary.ImportPath)
+			}
+		}
+		for _, alts := range ors {
+			if !a.dischargedOr(alts, valueID.Name) {
+				reportUnprovenReturnsOr(a.diags, a.fset, call, alts, valueID.Name, a.summary.ImportPath)
 			}
 		}
 	}
@@ -641,6 +726,35 @@ func reportUnprovenReturns(diags *[]Diagnostic, fset *token.FileSet, call *ast.C
 	})
 }
 
+// reportUnprovenReturnsOr emits a diagnostic when a proven.Or(...)
+// disjunction listed in proven.Returns cannot be satisfied on the
+// return value. The fix is the same as for unproven leaf returns
+// (establish a fact via guard / prove / trust), but the message
+// renders the whole Or so the user sees which alternatives are
+// available.
+func reportUnprovenReturnsOr(diags *[]Diagnostic, fset *token.FileSet, call *ast.CallExpr, alts []Predicate, varName, currentPkg string) {
+	pos := fset.Position(call.Pos())
+	*diags = append(*diags, Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg: fmt.Sprintf(
+			"proven: proven.Returns disjunction proven.Or(%s) is not established on %s — satisfy at least one alternative (guard, prove, or trust) before returning",
+			altsLabel(alts, currentPkg), varName,
+		),
+	})
+}
+
+// altsLabel renders an Or alt list for diagnostics: comma-separated
+// predicate labels using predicateLabelFor for each.
+func altsLabel(alts []Predicate, currentPkg string) string {
+	parts := make([]string, len(alts))
+	for i, p := range alts {
+		parts[i] = predicateLabelFor(p, currentPkg)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // predicateLabelFor renders a predicate for a diagnostic: same-
 // package predicates use the bare name; cross-package ones keep a
 // short package qualifier (last path segment).
@@ -667,6 +781,7 @@ func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
 	if !ok {
 		return
 	}
+	paramIndex := make(map[int]int)
 	var params []ParamDischarge
 	for idx, required := range sum.ParamPreds {
 		if idx >= len(call.Args) {
@@ -679,12 +794,40 @@ func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
 				missing = append(missing, p)
 			}
 		}
+		paramIndex[idx] = len(params)
 		params = append(params, ParamDischarge{
 			ParamIdx: idx,
 			ArgName:  argName,
 			Required: append([]Predicate(nil), required...),
 			Missing:  missing,
 		})
+	}
+	for idx, requiredOrs := range sum.ParamOrs {
+		if idx >= len(call.Args) {
+			continue
+		}
+		argName, _ := identName(call.Args[idx])
+		var missingOrs [][]Predicate
+		for _, alts := range requiredOrs {
+			if !a.dischargedOr(alts, argName) {
+				missingOrs = append(missingOrs, append([]Predicate(nil), alts...))
+			}
+		}
+		copiedReq := make([][]Predicate, len(requiredOrs))
+		for i, alts := range requiredOrs {
+			copiedReq[i] = append([]Predicate(nil), alts...)
+		}
+		if pos, ok := paramIndex[idx]; ok {
+			params[pos].RequiredOrs = copiedReq
+			params[pos].MissingOrs = missingOrs
+		} else {
+			params = append(params, ParamDischarge{
+				ParamIdx:    idx,
+				ArgName:     argName,
+				RequiredOrs: copiedReq,
+				MissingOrs:  missingOrs,
+			})
+		}
 	}
 	if len(params) == 0 {
 		return
@@ -761,6 +904,40 @@ func (a *analyzer) discharged(pred Predicate, varName string) bool {
 		return false
 	}
 	return a.dischargedRec(pred, varName, make(map[Predicate]bool))
+}
+
+// plantTrailingFacts adds every leaf and disjunctive fact carried
+// by tp as a fact on variable v. Shared between the prove.Must /
+// trust.That assignment sites so the Or-handling stays in one place.
+func (a *analyzer) plantTrailingFacts(tp TrailingPreds, v string) {
+	for _, p := range tp.Leaves {
+		a.facts.Add(Fact{Pred: p, Var: v})
+	}
+	for _, alts := range tp.Ors {
+		a.facts.AddOr(alts, v)
+	}
+}
+
+// dischargedOr reports whether a disjunctive obligation (`Or(alts...)`)
+// holds on varName. Two paths succeed:
+//
+//   - Any alt is `a.discharged` on varName — a stronger fact implies
+//     the Or.
+//   - The fact set already carries a structural-equality Or-fact
+//     matching alts on varName (sorted / alt-order-insensitive) —
+//     the fact directly asserts the disjunction.
+//
+// An empty alts list never discharges.
+func (a *analyzer) dischargedOr(alts []Predicate, varName string) bool {
+	if varName == "" || len(alts) == 0 {
+		return false
+	}
+	for _, p := range alts {
+		if a.discharged(p, varName) {
+			return true
+		}
+	}
+	return a.facts.HasOr(alts, varName)
 }
 
 func (a *analyzer) dischargedRec(pred Predicate, varName string, visited map[Predicate]bool) bool {
@@ -860,11 +1037,14 @@ func (a *analyzer) applyAssignPostconditions(s *ast.AssignStmt) {
 	}
 	// proven.Returns-annotated callee.
 	if calleePkg, key, ok := a.resolveCallee(call); ok {
-		if sum, ok := a.lookupCalleeSummary(calleePkg, key); ok && len(sum.ReturnPreds) > 0 {
+		if sum, ok := a.lookupCalleeSummary(calleePkg, key); ok && (len(sum.ReturnPreds) > 0 || len(sum.ReturnOrs) > 0) {
 			for _, lhs := range s.Lhs {
 				if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
 					for _, p := range sum.ReturnPreds {
 						a.facts.Add(Fact{Pred: p, Var: id.Name})
+					}
+					for _, alts := range sum.ReturnOrs {
+						a.facts.AddOr(alts, id.Name)
 					}
 				}
 			}
@@ -875,9 +1055,7 @@ func (a *analyzer) applyAssignPostconditions(s *ast.AssignStmt) {
 		preds := a.proveCallPredicates(call, "Must")
 		for _, lhs := range s.Lhs {
 			if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
-				for _, p := range preds {
-					a.facts.Add(Fact{Pred: p, Var: id.Name})
-				}
+				a.plantTrailingFacts(preds, id.Name)
 			}
 		}
 	}
@@ -891,9 +1069,7 @@ func (a *analyzer) applyAssignPostconditions(s *ast.AssignStmt) {
 		preds := a.trustCallPredicates(call)
 		for _, lhs := range s.Lhs {
 			if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
-				for _, p := range preds {
-					a.facts.Add(Fact{Pred: p, Var: id.Name})
-				}
+				a.plantTrailingFacts(preds, id.Name)
 			}
 		}
 	}
@@ -919,11 +1095,14 @@ func (a *analyzer) applyDeclPostconditions(vs *ast.ValueSpec) {
 		return
 	}
 	if calleePkg, key, ok := a.resolveCallee(call); ok {
-		if sum, ok := a.lookupCalleeSummary(calleePkg, key); ok && len(sum.ReturnPreds) > 0 {
+		if sum, ok := a.lookupCalleeSummary(calleePkg, key); ok && (len(sum.ReturnPreds) > 0 || len(sum.ReturnOrs) > 0) {
 			for _, name := range vs.Names {
 				if name.Name != "_" {
 					for _, p := range sum.ReturnPreds {
 						a.facts.Add(Fact{Pred: p, Var: name.Name})
+					}
+					for _, alts := range sum.ReturnOrs {
+						a.facts.AddOr(alts, name.Name)
 					}
 				}
 			}
@@ -933,9 +1112,7 @@ func (a *analyzer) applyDeclPostconditions(vs *ast.ValueSpec) {
 		preds := a.proveCallPredicates(call, "Must")
 		for _, name := range vs.Names {
 			if name.Name != "_" {
-				for _, p := range preds {
-					a.facts.Add(Fact{Pred: p, Var: name.Name})
-				}
+				a.plantTrailingFacts(preds, name.Name)
 			}
 		}
 	}
@@ -943,9 +1120,7 @@ func (a *analyzer) applyDeclPostconditions(vs *ast.ValueSpec) {
 		preds := a.trustCallPredicates(call)
 		for _, name := range vs.Names {
 			if name.Name != "_" {
-				for _, p := range preds {
-					a.facts.Add(Fact{Pred: p, Var: name.Name})
-				}
+				a.plantTrailingFacts(preds, name.Name)
 			}
 		}
 	}
@@ -1013,9 +1188,7 @@ func (a *analyzer) tryProvePattern(assignStmt, guardStmt ast.Stmt) bool {
 	if ifStmt.Else != nil {
 		a.facts = unionFacts(saved, negFacts)
 		if elseHasProve {
-			for _, f := range pa.facts {
-				a.facts.Add(f)
-			}
+			pa.plant(a.facts)
 		}
 		switch e := ifStmt.Else.(type) {
 		case *ast.BlockStmt:
@@ -1037,16 +1210,12 @@ func (a *analyzer) tryProvePattern(assignStmt, guardStmt ast.Stmt) bool {
 	case thenEscapes && !elseEscapes:
 		a.facts = unionFacts(saved, negFacts)
 		if elseHasProve {
-			for _, f := range pa.facts {
-				a.facts.Add(f)
-			}
+			pa.plant(a.facts)
 		}
 	case !thenEscapes && elseEscapes:
 		a.facts = unionFacts(saved, guardFacts)
 		if thenHasProve {
-			for _, f := range pa.facts {
-				a.facts.Add(f)
-			}
+			pa.plant(a.facts)
 		}
 	default:
 		a.facts = saved
@@ -1056,11 +1225,25 @@ func (a *analyzer) tryProvePattern(assignStmt, guardStmt ast.Stmt) bool {
 
 // proveAssign captures the essentials of a recognized
 // `v, err := prove.That(y, preds...)` assignment: the identifiers
-// bound to the value and the error, and the facts the pattern
-// implies on the err == nil side.
+// bound to the value and the error, and the facts (leaf + Or) the
+// pattern implies on the err == nil side.
 type proveAssign struct {
-	errVar string
-	facts  []Fact
+	errVar   string
+	valueVar string
+	facts    []Fact
+	ors      [][]Predicate
+}
+
+// plant adds every leaf fact and disjunctive fact carried by pa to
+// fs; used at the err == nil branch of a recognized prove.That +
+// err-check pairing.
+func (pa *proveAssign) plant(fs *FactSet) {
+	for _, f := range pa.facts {
+		fs.Add(f)
+	}
+	for _, alts := range pa.ors {
+		fs.AddOr(alts, pa.valueVar)
+	}
 }
 
 // detectProveAssign recognizes an assignment statement that binds
@@ -1089,11 +1272,16 @@ func (a *analyzer) detectProveAssign(stmt ast.Stmt) *proveAssign {
 		return nil
 	}
 	preds := a.proveCallPredicates(call, "That")
-	facts := make([]Fact, 0, len(preds))
-	for _, p := range preds {
+	facts := make([]Fact, 0, len(preds.Leaves))
+	for _, p := range preds.Leaves {
 		facts = append(facts, Fact{Pred: p, Var: valueID.Name})
 	}
-	return &proveAssign{errVar: errID.Name, facts: facts}
+	return &proveAssign{
+		errVar:   errID.Name,
+		valueVar: valueID.Name,
+		facts:    facts,
+		ors:      preds.Ors,
+	}
 }
 
 type errCondKind int
@@ -1154,11 +1342,21 @@ func (a *analyzer) isProveCall(call *ast.CallExpr, which string) bool {
 	return sel.Sel.Name == which
 }
 
+// TrailingPreds carries the result of resolving the trailing
+// predicate list of a prove.That / prove.Must / trust.That call.
+// Leaves are leaf / And-decomposed predicates; Ors are disjunctive
+// facts (from inline proven.Or(...)) that should be planted on the
+// same LHS variable.
+type TrailingPreds struct {
+	Leaves []Predicate
+	Ors    [][]Predicate
+}
+
 // proveCallPredicates returns the predicates passed after the
 // value argument to a prove.That or prove.Must call. Unresolvable
 // predicate arguments emit a strict-mode diagnostic via the
 // analyzer's diags channel (when non-nil).
-func (a *analyzer) proveCallPredicates(call *ast.CallExpr, which string) []Predicate {
+func (a *analyzer) proveCallPredicates(call *ast.CallExpr, which string) TrailingPreds {
 	return a.resolveTrailingPredicates(call, "argument to prove."+which)
 }
 
@@ -1183,7 +1381,7 @@ func (a *analyzer) isTrustCall(call *ast.CallExpr, which string) bool {
 // value argument to a trust.That call. Unresolvable predicate
 // arguments emit a strict-mode diagnostic (when the analyzer was
 // constructed with a diags channel).
-func (a *analyzer) trustCallPredicates(call *ast.CallExpr) []Predicate {
+func (a *analyzer) trustCallPredicates(call *ast.CallExpr) TrailingPreds {
 	return a.resolveTrailingPredicates(call, "argument to trust.That")
 }
 
@@ -1199,17 +1397,18 @@ func (a *analyzer) trustCallPredicates(call *ast.CallExpr) []Predicate {
 // proven.And(a, b)) plants both leaf facts a and b on the LHS of
 // the assignment, same as prove.Must(raw, a, b). Nested And
 // flattens fully.
-func (a *analyzer) resolveTrailingPredicates(call *ast.CallExpr, role string) []Predicate {
+func (a *analyzer) resolveTrailingPredicates(call *ast.CallExpr, role string) TrailingPreds {
+	var out TrailingPreds
 	if len(call.Args) < 2 {
-		return nil
+		return out
 	}
-	var out []Predicate
 	for _, arg := range call.Args[1:] {
-		leaves, ok := resolveAndFlat(arg, a.imp, a.summary.ImportPath, a.fset, a.diags, role)
+		leaves, ors, ok := resolveAndFlat(arg, a.imp, a.summary.ImportPath, a.fset, a.diags, role)
 		if !ok {
 			continue
 		}
-		out = append(out, leaves...)
+		out.Leaves = append(out.Leaves, leaves...)
+		out.Ors = append(out.Ors, ors...)
 	}
 	return out
 }

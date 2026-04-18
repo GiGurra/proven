@@ -29,6 +29,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"strings"
 )
 
 // planUserPackage handles the compile of any package other than
@@ -362,8 +363,29 @@ func dischargeDiagnostics(d CallDischarge, fset *token.FileSet, currentPkg strin
 				),
 			})
 		}
+		for _, alts := range p.MissingOrs {
+			out = append(out, Diagnostic{
+				File: pos.Filename,
+				Line: pos.Line,
+				Col:  pos.Column,
+				Msg: fmt.Sprintf(
+					"proven: undischarged disjunction proven.Or(%s) on parameter %d of %s",
+					altsLabelList(alts, currentPkg), p.ParamIdx, callee,
+				),
+			})
+		}
 	}
 	return out
+}
+
+// altsLabelList renders an Or-alt list: comma-separated predicate
+// labels via predicateLabel, used by the Or-obligation diagnostic.
+func altsLabelList(alts []Predicate, currentPkg string) string {
+	parts := make([]string, len(alts))
+	for i, p := range alts {
+		parts[i] = predicateLabel(p, currentPkg)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // predicateLabel renders a Predicate for human consumption in a

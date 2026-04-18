@@ -1,0 +1,1 @@
+proven: undischarged disjunction proven.Or(isPositive, lessThan100)
