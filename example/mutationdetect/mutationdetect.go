@@ -1,6 +1,7 @@
 package mutationdetect
 
 import (
+	"github.com/GiGurra/proven/pkg/prove"
 	"github.com/GiGurra/proven/pkg/proven"
 )
 
@@ -22,9 +23,14 @@ func Foo() {
 	}
 
 	holder := PtrHolder{}
-	if holder.Value != nil {
-		NeedsNonNil(holder.Value)
+	//if holder.Value != nil { // works
+	//prove.Must //works
+	_, err := prove.That(holder.Value, proven.NonNil)
+	if err != nil {
+		return
 	}
+	NeedsNonNil(holder.Value)
+	//}
 }
 
 func Foo2[T any](t T) {

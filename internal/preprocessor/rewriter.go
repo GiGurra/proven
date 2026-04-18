@@ -62,7 +62,7 @@ func rewriteSource(path string, f *ast.File, fset *token.FileSet, imp *importInf
 		return nil, false, err
 	}
 
-	edits, usedAliases := collectRewrites(f, fset, imp.provenAlias, trustAlias)
+	edits, usedAliases := collectRewrites(f, fset, imp, trustAlias)
 	if len(edits) == 0 {
 		return nil, false, nil
 	}
@@ -166,12 +166,13 @@ type rewriteEdit struct {
 // all captured. An empty alias ("" for a package not imported
 // by the file) makes the corresponding branch a no-op via
 // isSel's alias check.
-func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias, trustAlias string) ([]rewriteEdit, map[string]string) {
+func collectRewrites(f *ast.File, fset *token.FileSet, imp *importInfo, trustAlias string) ([]rewriteEdit, map[string]string) {
+	provenAlias := imp.provenAlias
 	var edits []rewriteEdit
 	usedAliases := map[string]string{}
 	recordUsed := func(args []ast.Expr) {
 		for _, arg := range args {
-			collectAliasRefs(arg, provenAlias, trustAlias, usedAliases)
+			collectAliasRefs(arg, imp, provenAlias, trustAlias, usedAliases)
 		}
 	}
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -181,7 +182,18 @@ func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias, trustAlias s
 			if !ok {
 				return true
 			}
-			if !isSel(call, provenAlias, "That") {
+			// Bare fact-assertion statements — proven.That, and the
+			// purely-passthrough trust.That — are erased whole. If
+			// we erased only the wrapper the surviving arg[0] would
+			// become an invalid bare expression statement ("x is
+			// not used"). Blanking the whole ExprStmt is safe
+			// because neither call has observable side effects
+			// under the preprocessor contract: trust.That is a no-op
+			// at runtime, and proven.That's runtime behavior is
+			// gated behind the preprocessor link symbol.
+			wholeStmt := isSel(call, provenAlias, "That") ||
+				isSel(call, trustAlias, "That")
+			if !wholeStmt {
 				return true
 			}
 			start := fset.Position(node.Pos()).Offset
@@ -191,12 +203,15 @@ func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias, trustAlias s
 				argStart: end, argEnd: end,
 			})
 			recordUsed(call.Args)
-			// Fall through so a nested proven.Returns inside the
-			// args of an about-to-be-erased proven.That is still
-			// collected; leaving it un-erased would waste bytes
-			// but it is overwritten by the outer blank pass.
-			// Descending costs nothing and keeps behavior simple.
-			return true
+			// Do NOT descend: a descent would re-match the inner
+			// CallExpr (trust.That / proven.Returns) and add a
+			// second, overlapping edit that preserves arg[0]. Under
+			// applyRewrites' layered write the second edit would
+			// win for its range, restoring arg[0] into a now-bare
+			// expression position and producing invalid Go. Any
+			// nested proven.Returns inside the args is already
+			// covered by the outer whole-statement blank.
+			return false
 		case *ast.CallExpr:
 			switch {
 			case isSel(node, provenAlias, "Returns"):
@@ -233,7 +248,13 @@ func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias, trustAlias s
 // trust), the first selector name we see. The alias → name map lets
 // the rewriter emit one import sentinel per package whose only
 // references were inside erased call spans.
-func collectAliasRefs(expr ast.Expr, provenAlias, trustAlias string, out map[string]string) {
+//
+// Receivers that look like import aliases syntactically but are not
+// imports in this file (a local variable named the same as a Go
+// package, or a field selector rooted in a local) are skipped: the
+// generated sentinel would land at file scope where no such binding
+// exists and produce an "undefined" compile error.
+func collectAliasRefs(expr ast.Expr, imp *importInfo, provenAlias, trustAlias string, out map[string]string) {
 	ast.Inspect(expr, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
 		if !ok {
@@ -244,6 +265,12 @@ func collectAliasRefs(expr ast.Expr, provenAlias, trustAlias string, out map[str
 			return true
 		}
 		if id.Name == provenAlias || id.Name == trustAlias {
+			return true
+		}
+		if imp == nil {
+			return true
+		}
+		if _, isImport := imp.aliases[id.Name]; !isImport {
 			return true
 		}
 		if _, seen := out[id.Name]; seen {

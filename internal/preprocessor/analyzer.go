@@ -705,9 +705,55 @@ func (a *analyzer) walkCalls(expr ast.Expr) {
 		if call, ok := n.(*ast.CallExpr); ok {
 			a.recordCallDischarge(call)
 			a.verifyProvenReturns(call)
+			a.plantFromInlineFactCall(call)
 		}
 		return true
 	})
+}
+
+// plantFromInlineFactCall plants sources for prove.Must / trust.That
+// calls when the first argument is a canonically-keyable expression.
+// This makes the in-place idiom
+//
+//	prove.Must(holder.Value, proven.NonNil)
+//	needsNonNil(holder.Value)
+//
+// discharge without requiring a local binding: once prove.Must has
+// returned without panicking, the predicate holds on its first
+// argument, irrespective of whether the return value was captured.
+// Same reasoning for trust.That (the programmer vouches for the
+// predicate at the call site).
+//
+// Assigned forms (`v := prove.Must(x, p)`) still plant on the LHS in
+// applyAssignPostconditions; this function plants on the first-arg
+// key additionally, since the two keys may differ (the LHS has a new
+// identity; the first-arg key is whatever the caller passed in).
+//
+// prove.That is intentionally omitted: its bare form discards the
+// (value, error) pair and therefore tells the analyzer nothing —
+// whether the predicate held at runtime is unknowable from the call
+// site's AST without the err-check pattern tryProvePattern handles.
+func (a *analyzer) plantFromInlineFactCall(call *ast.CallExpr) {
+	if len(call.Args) < 2 {
+		return
+	}
+	var preds TrailingPreds
+	switch {
+	case a.isProveCall(call, "Must"):
+		preds = a.proveCallPredicates(call, "Must")
+	case a.isTrustCall(call, "That"):
+		preds = a.trustCallPredicates(call)
+	default:
+		return
+	}
+	if len(preds.Leaves) == 0 && len(preds.Ors) == 0 {
+		return
+	}
+	key, ok := exprKey(call.Args[0], a.imp)
+	if !ok {
+		return
+	}
+	a.plantTrailingFacts(preds, key, call.Args[0].Pos())
 }
 
 // verifyProvenReturns checks that every predicate supplied to
@@ -1517,43 +1563,58 @@ func (a *analyzer) tryProvePattern(assignStmt, guardStmt ast.Stmt) bool {
 	return true
 }
 
-// emitProveAssignAsSources mirrors the leaves / Or-facts carried by
-// pa as source events at pos in the current scope. Called at every
-// site where tryProvePattern's FactSet-based path plants pa's facts,
-// so the event stream picks up the successful-prove postconditions
-// at the same control-flow positions.
+// emitProveAssignAsSources plants pa's predicates as Source events
+// at pos in the current scope, once per tracked target. A target is
+// any canonical key where the successfully-proved value lives: the
+// LHS value ident (when non-blank) and the first-arg canonical key
+// (when the argument was keyable). Both point at the same runtime
+// value, so the analyzer can discharge a downstream call that uses
+// either name — most importantly, this enables
+//
+//	_, err := prove.That(holder.Value, proven.NonNil)
+//	if err != nil { return }
+//	needsNonNil(holder.Value)
+//
+// where the value LHS is blank and the fact must ride the first-arg
+// key to reach the next use.
 func (a *analyzer) emitProveAssignAsSources(pa *proveAssign, pos token.Pos) {
-	for _, f := range pa.facts {
-		a.rec.sourceLeaf(pos, f.Pred, f.Var)
-	}
-	for _, alts := range pa.ors {
-		a.rec.sourceOr(pos, alts, pa.valueVar)
+	for _, target := range pa.targets {
+		for _, p := range pa.leaves {
+			a.rec.sourceLeaf(pos, p, target)
+		}
+		for _, alts := range pa.ors {
+			a.rec.sourceOr(pos, alts, target)
+		}
 	}
 }
 
-// proveAssign captures the essentials of a recognized
-// `v, err := prove.That(y, preds...)` assignment: the identifiers
-// bound to the value and the error, and the facts (leaf + Or) the
-// pattern implies on the err == nil side.
+// proveAssign captures a recognized `v, err := prove.That(y,
+// preds...)` assignment. targets holds every canonical key where
+// the preds hold on the err == nil side: the LHS value ident if
+// non-blank, and the first-arg key if that argument canonicalizes
+// (a bare identifier or identifier-rooted selector chain). Either
+// target is sufficient for downstream discharge; both can be present
+// when `v := prove.That(x.F, p)` binds a new ident while the
+// original selector path also continues to hold the predicate.
 type proveAssign struct {
-	errVar   string
-	valueVar string
-	facts    []Fact
-	ors      [][]Predicate
+	errVar  string
+	targets []string
+	leaves  []Predicate
+	ors     [][]Predicate
 }
 
 // detectProveAssign recognizes an assignment statement that binds
-// two identifiers (value, error) to a prove.That call and returns
-// the associated proveAssign. Blank identifiers disqualify the
-// pattern — there is nothing to pair the err-check against if the
-// caller discarded the error.
+// two LHS positions to a prove.That call and returns the associated
+// proveAssign. The error LHS must be a non-blank identifier — the
+// err-check pairing in tryProvePattern has nothing to correlate
+// against otherwise. The value LHS may be blank; in that case the
+// pattern still tracks the first-arg canonical key as the plant
+// target, so _, err := prove.That(expr, p) still rides p as a fact
+// on expr once the err-check clears. If neither the value LHS nor
+// the first-arg is trackable, the pattern is declined.
 func (a *analyzer) detectProveAssign(stmt ast.Stmt) *proveAssign {
 	as, ok := stmt.(*ast.AssignStmt)
 	if !ok || len(as.Lhs) != 2 || len(as.Rhs) != 1 {
-		return nil
-	}
-	valueID, ok := as.Lhs[0].(*ast.Ident)
-	if !ok || valueID.Name == "_" {
 		return nil
 	}
 	errID, ok := as.Lhs[1].(*ast.Ident)
@@ -1567,16 +1628,26 @@ func (a *analyzer) detectProveAssign(stmt ast.Stmt) *proveAssign {
 	if !a.isProveCall(call, "That") {
 		return nil
 	}
-	preds := a.proveCallPredicates(call, "That")
-	facts := make([]Fact, 0, len(preds.Leaves))
-	for _, p := range preds.Leaves {
-		facts = append(facts, Fact{Pred: p, Var: valueID.Name})
+	var targets []string
+	if valueID, ok := as.Lhs[0].(*ast.Ident); ok && valueID.Name != "_" {
+		targets = append(targets, valueID.Name)
 	}
+	if len(call.Args) > 0 {
+		if srcKey, ok := exprKey(call.Args[0], a.imp); ok {
+			if !slices.Contains(targets, srcKey) {
+				targets = append(targets, srcKey)
+			}
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	preds := a.proveCallPredicates(call, "That")
 	return &proveAssign{
-		errVar:   errID.Name,
-		valueVar: valueID.Name,
-		facts:    facts,
-		ors:      preds.Ors,
+		errVar:  errID.Name,
+		targets: targets,
+		leaves:  preds.Leaves,
+		ors:     preds.Ors,
 	}
 }
 
