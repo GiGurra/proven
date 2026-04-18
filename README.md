@@ -68,7 +68,12 @@ func main() {
 
 Signatures stay plain Go. Predicates are ordinary `func(T) bool`. No wrapper types, no generics ceremony, no struct decorations, no codegen. `gopls` and `go vet` see ordinary code, so IDE checking stays green — but building without the preprocessor fails loudly at link time, so you cannot silently ship code that bypasses the contract system.
 
-**The preconditions of every function become visible, machine-checked documentation.** A `proven.That(x, isPositive)` at the top of a function body reads as executable docstring — a future reader sees exactly what the function expects, and the compiler enforces it at every call site. The two failure modes of requirement-tracking collapse into one: nobody forgets what a parameter requires, because the requirement is right there in the code; nobody defensively re-validates "just in case," because a discharged obligation erases to zero runtime cost. The library's job is to let you always declare what must hold, without ever paying for it at runtime, and without relying on a comment someone has to remember to update.
+**Preconditions as visible, machine-checked documentation.** A `proven.That(x, isPositive)` at the top of a function body does two jobs at once:
+
+- Documentation a reader can't miss — the requirement lives in the code, not in a comment that drifts out of sync.
+- A check the compiler runs at every call site, at build time, at zero runtime cost once discharged.
+
+Declare once what must hold. Nobody forgets — the requirement is right there. Nobody re-validates defensively — a discharged obligation erases to nothing. A predicate written once is enforced everywhere the function is called, for as long as it stays declared.
 
 ## Quick start
 
