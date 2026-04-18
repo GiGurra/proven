@@ -93,7 +93,14 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	// analyzer records a discharge only when the summary has
 	// ParamPreds, which comes from the callee itself). Nothing
 	// to check, nothing to erase, no sidecar to write.
-	if len(sum.Funcs) == 0 && len(imports) == 0 {
+	//
+	// sum.Rules carries declared inference rules (`var _ =
+	// infer.From(p).To(q)`), which are part of the downstream
+	// discharge story even for packages with no local obligations:
+	// a rules-only package must still write its sidecar so callers
+	// that import it pick up the implications via the Phase 6
+	// sidecar-lookup path.
+	if len(sum.Funcs) == 0 && len(sum.Rules) == 0 && len(imports) == 0 {
 		return nil, nil
 	}
 
