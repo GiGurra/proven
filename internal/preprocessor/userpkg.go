@@ -29,6 +29,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -226,7 +227,53 @@ func parsePackageSources(sources []string) (*token.FileSet, []*ast.File, error) 
 // whose predicate argument is unresolvable). Passing nil for either
 // disables strict reporting — used by tests that exercise
 // same-package-only flow without a diagnostic channel.
+//
+// Two-phase pipeline:
+//
+//   - Discovery (fixpoint): repeatedly walks every FuncDecl with
+//     diagnostics suppressed, populating each function's
+//     DerivedReturnPreds / DerivedReturnOrs in `sum` until nothing
+//     changes. Iteration is needed because a caller's derived return
+//     can depend on a callee's derived return; in source-declaration
+//     order or with mutual recursion, one pass is not enough. The
+//     iteration is sound and terminates because the only way derived
+//     returns change is to GROW (a callee learns new postconditions
+//     once its own callees' derived returns are known), and the
+//     space of (Predicate, function) pairs is finite. A safety cap
+//     stops runaway behavior if some future change accidentally
+//     introduces non-monotonic updates — final state is sound either
+//     way, since smaller derived returns only cause more discharge
+//     failures, not silent acceptance of bad code.
+//
+//   - Discharge: one final pass collects CallDischarges and emits
+//     diagnostics, with the now-complete derived-return picture in
+//     `sum`. Suppressing diagnostics during discovery prevents
+//     duplicate strict-mode errors.
+//
+// Cross-package transitivity is handled separately by sidecars: each
+// upstream package's compile finishes its own fixpoint and writes
+// the complete summary before any downstream compile reads it.
 func analyzePackageFiles(sum *PackageSummary, files []*ast.File, imports map[string]*PackageSummary, fset *token.FileSet, diags *[]Diagnostic) []CallDischarge {
+	const safetyCap = 64 // see comment above; monotonic growth + finite lattice → terminates well before this
+	for range safetyCap {
+		changed := false
+		for _, f := range files {
+			imp := collectImports(f)
+			for _, decl := range f.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok {
+					continue
+				}
+				_, leaves, ors := AnalyzeFuncWithReturns(fn, sum, imp, imports, nil, nil)
+				if recordDerivedReturnsIfChanged(sum, fn, leaves, ors) {
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
 	var all []CallDischarge
 	for _, f := range files {
 		imp := collectImports(f)
@@ -235,29 +282,30 @@ func analyzePackageFiles(sum *PackageSummary, files []*ast.File, imports map[str
 			if !ok {
 				continue
 			}
-			calls, derivedLeaves, derivedOrs := AnalyzeFuncWithReturns(fn, sum, imp, imports, fset, diags)
+			calls := AnalyzeFunc(fn, sum, imp, imports, fset, diags)
 			all = append(all, calls...)
-			recordDerivedReturns(sum, fn, derivedLeaves, derivedOrs)
 		}
 	}
 	return all
 }
 
-// recordDerivedReturns stores the analyzer-inferred postconditions on
-// the function's summary entry so cross-package sidecar readers and
-// same-package downstream fact-plant sites pick them up without the
-// function needing an explicit proven.Returns. Unchanged when the
-// analyzer produced no facts, so functions whose bodies establish
-// nothing add no load to the sidecar.
+// recordDerivedReturnsIfChanged stores the analyzer-inferred
+// postconditions on the function's summary entry so cross-package
+// sidecar readers and same-package downstream fact-plant sites pick
+// them up without the function needing an explicit proven.Returns.
+// Returns true iff the entry's derived-return content actually
+// differs from what is already there — used by the discovery-pass
+// fixpoint loop to detect when the package summary has stabilized.
 //
 // A summary entry is created on demand if none exists yet — normal
 // scan output skips un-annotated functions. The entry's ParamPreds is
 // initialized to a non-nil map so later scanner-visible fields do not
 // see a sparse value.
-func recordDerivedReturns(sum *PackageSummary, fn *ast.FuncDecl, leaves []Predicate, ors [][]Predicate) {
-	if len(leaves) == 0 && len(ors) == 0 {
-		return
-	}
+//
+// Equality is computed against canonical sorted forms so that
+// non-deterministic map-iteration ordering inside intersectReturns
+// does not register as a spurious change.
+func recordDerivedReturnsIfChanged(sum *PackageSummary, fn *ast.FuncDecl, leaves []Predicate, ors [][]Predicate) bool {
 	if sum.Funcs == nil {
 		sum.Funcs = make(map[string]*FuncSummary)
 	}
@@ -272,6 +320,10 @@ func recordDerivedReturns(sum *PackageSummary, fn *ast.FuncDecl, leaves []Predic
 	}
 	entry, ok := sum.Funcs[key]
 	if !ok {
+		// Empty new state on a never-seen function: no entry needed.
+		if len(leaves) == 0 && len(ors) == 0 {
+			return false
+		}
 		entry = &FuncSummary{
 			Name:       name,
 			Recv:       recv,
@@ -279,8 +331,37 @@ func recordDerivedReturns(sum *PackageSummary, fn *ast.FuncDecl, leaves []Predic
 		}
 		sum.Funcs[key] = entry
 	}
+	if leafKey(leaves) == leafKey(entry.DerivedReturnPreds) && orsKey(ors) == orsKey(entry.DerivedReturnOrs) {
+		return false
+	}
 	entry.DerivedReturnPreds = leaves
 	entry.DerivedReturnOrs = ors
+	return true
+}
+
+// leafKey renders a leaf-predicate list as a stable, order-insensitive
+// canonical string so two slices with the same set of predicates in
+// different orders compare equal.
+func leafKey(leaves []Predicate) string {
+	parts := make([]string, len(leaves))
+	for i, p := range leaves {
+		parts[i] = p.Pkg + "|" + p.Name
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, ",")
+}
+
+// orsKey renders a list of Or-alt sets as a stable, order-insensitive
+// canonical string. Each alt set is canonicalized via orKey, then the
+// resulting strings are themselves sorted so the outer ordering
+// produced by intersectReturns is irrelevant to equality.
+func orsKey(ors [][]Predicate) string {
+	parts := make([]string, len(ors))
+	for i, alts := range ors {
+		parts[i] = orKey(alts)
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, ";")
 }
 
 // rewritePlan walks each source file, rewrites any proven.That /
