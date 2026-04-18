@@ -19,7 +19,6 @@ func target(x int) {
 func main() {
 	x := 42
 	if callee.IsPositive(x) {
-		v := callee.Forward(x)
-		target(v)
+		target(callee.Forward(x)) // nested: Forward's sidecar-advertised postcondition flows into target
 	}
 }

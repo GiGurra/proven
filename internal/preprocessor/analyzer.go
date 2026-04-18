@@ -819,53 +819,46 @@ func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
 	if !ok {
 		return
 	}
-	paramIndex := make(map[int]int)
+	indices := paramIndicesUnion(sum)
 	var params []ParamDischarge
-	for idx, required := range sum.ParamPreds {
+	for _, idx := range indices {
 		if idx >= len(call.Args) {
 			continue
 		}
-		argName, _ := identName(call.Args[idx])
+		argName, restore := a.bindArgForCheck(call.Args[idx], idx)
+		required := sum.ParamPreds[idx]
+		requiredOrs := sum.ParamOrs[idx]
+
 		var missing []Predicate
 		for _, p := range required {
 			if !a.discharged(p, argName) {
 				missing = append(missing, p)
 			}
 		}
-		paramIndex[idx] = len(params)
-		params = append(params, ParamDischarge{
-			ParamIdx: idx,
-			ArgName:  argName,
-			Required: append([]Predicate(nil), required...),
-			Missing:  missing,
-		})
-	}
-	for idx, requiredOrs := range sum.ParamOrs {
-		if idx >= len(call.Args) {
-			continue
-		}
-		argName, _ := identName(call.Args[idx])
 		var missingOrs [][]Predicate
 		for _, alts := range requiredOrs {
 			if !a.dischargedOr(alts, argName) {
 				missingOrs = append(missingOrs, append([]Predicate(nil), alts...))
 			}
 		}
-		copiedReq := make([][]Predicate, len(requiredOrs))
-		for i, alts := range requiredOrs {
-			copiedReq[i] = append([]Predicate(nil), alts...)
+		restore()
+
+		pd := ParamDischarge{
+			ParamIdx: idx,
+			ArgName:  argName,
+			Missing:  missing,
 		}
-		if pos, ok := paramIndex[idx]; ok {
-			params[pos].RequiredOrs = copiedReq
-			params[pos].MissingOrs = missingOrs
-		} else {
-			params = append(params, ParamDischarge{
-				ParamIdx:    idx,
-				ArgName:     argName,
-				RequiredOrs: copiedReq,
-				MissingOrs:  missingOrs,
-			})
+		if len(required) > 0 {
+			pd.Required = append([]Predicate(nil), required...)
 		}
+		if len(requiredOrs) > 0 {
+			pd.RequiredOrs = make([][]Predicate, len(requiredOrs))
+			for i, alts := range requiredOrs {
+				pd.RequiredOrs[i] = append([]Predicate(nil), alts...)
+			}
+			pd.MissingOrs = missingOrs
+		}
+		params = append(params, pd)
 	}
 	if len(params) == 0 {
 		return
@@ -877,6 +870,80 @@ func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
 		Params:    params,
 	})
 }
+
+// paramIndicesUnion returns every parameter index that carries either
+// a leaf or Or obligation in sum, sorted. Deterministic iteration
+// order so diagnostics stay stable across runs.
+func paramIndicesUnion(sum *FuncSummary) []int {
+	seen := make(map[int]struct{}, len(sum.ParamPreds)+len(sum.ParamOrs))
+	for idx := range sum.ParamPreds {
+		seen[idx] = struct{}{}
+	}
+	for idx := range sum.ParamOrs {
+		seen[idx] = struct{}{}
+	}
+	out := make([]int, 0, len(seen))
+	for idx := range seen {
+		out = append(out, idx)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// bindArgForCheck returns the variable name to use when checking
+// discharge for the idx-th argument, plus a `restore` closure that
+// reverses any facts the analyzer temporarily plants.
+//
+// Three cases:
+//
+//   - arg is a plain identifier: use it as-is, no virtual plant.
+//   - arg is a nested *ast.CallExpr whose callee has postconditions
+//     (explicit or derived): clone the fact set, plant the callee's
+//     returnFacts on a synthetic variable name, and use that name.
+//     The restore closure puts the original fact set back so the
+//     virtual facts do not leak into subsequent statements.
+//   - any other expression (literal, binary, field access, …):
+//     return an empty argName. The discharge check fails for every
+//     predicate on that argument, same as before.
+//
+// Only one level of nesting is examined per argument: the inner
+// call's own arg discharge fires independently at its own
+// recordCallDischarge pass when the analyzer walks the call. That
+// cascade is sufficient for the common `target(helper(x))` idiom
+// where every step has named-identifier inputs to its own callees.
+func (a *analyzer) bindArgForCheck(arg ast.Expr, idx int) (string, func()) {
+	if name, ok := identName(arg); ok {
+		return name, noRestore
+	}
+	inner, ok := arg.(*ast.CallExpr)
+	if !ok {
+		return "", noRestore
+	}
+	pkg, key, ok := a.resolveCallee(inner)
+	if !ok {
+		return "", noRestore
+	}
+	sum, ok := a.lookupCalleeSummary(pkg, key)
+	if !ok {
+		return "", noRestore
+	}
+	leaves, ors := returnFacts(sum)
+	if len(leaves) == 0 && len(ors) == 0 {
+		return "", noRestore
+	}
+	saved := a.facts
+	a.facts = saved.Clone()
+	vname := fmt.Sprintf("$arg%d", idx)
+	for _, p := range leaves {
+		a.facts.Add(Fact{Pred: p, Var: vname})
+	}
+	for _, alts := range ors {
+		a.facts.AddOr(alts, vname)
+	}
+	return vname, func() { a.facts = saved }
+}
+
+func noRestore() {}
 
 // resolveCallee returns (calleePkg, summaryKey, ok) for a call
 // whose callee the analyzer recognizes:

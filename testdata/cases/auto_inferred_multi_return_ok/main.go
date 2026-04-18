@@ -21,7 +21,6 @@ func target(x int) { proven.That(x, isPositive) }
 func main() {
 	x := 42
 	if isPositive(x) {
-		v := clamp(x)
-		target(v)
+		target(clamp(x)) // nested: clamp's derived postcondition flows into target
 	}
 }
