@@ -71,6 +71,22 @@ Roughly sequential — each phase relies on the previous — but the harness tol
 
 **Fixtures.** `const_literal_ok`, `const_pure_function_ok`, `const_impure_fails`.
 
+### Phase X — Parallel-safe sharing / shared-pass optimization (deferred)
+
+**Goal.** Avoid redundant parse and scan work across concurrent preprocessor invocations without breaking the toolexec model, which assumes each compile is an independent process.
+
+Context. `go build -p N` runs up to N package compiles concurrently, each invoking the preprocessor as a separate OS process. Today every invocation re-parses its own sources from disk and re-scans them, even when neighbour invocations just did the same work for the same imported packages (for the cross-package summaries Phase 6 will need) or even the same file (cgo-generated helpers compiled once per build variant, for example). As the module grows and Phases 6/7/9 layer on more per-package analyses, the duplicated work compounds.
+
+Shape of the solution. Rewire's answer is a first single-threaded pass that scans the whole module's test sources once and caches the result keyed by parent PID. We can do the same for proven's module-wide obligation and inference-rule tables — that cost is paid once even though N compiles read the cache — and keep the per-compile work as just the caller-side discharge for that package's own call sites. Other shapes worth considering: a side-channel file server (a short-lived daemon that arbitrates the first-read-wins cache), embedding the summary as a byte slice in the compiled object, or leaning on GOCACHE with a proven-owned subdirectory keyed by source hash.
+
+Boundaries to draw before implementing.
+
+- Which work is per-package-pure (can run fully in parallel with no coordination — e.g. the caller-side discharge for one package, given a stable callee summary) vs which needs a synchronized join (the module-wide summary table, the implication graph, the cross-package fact propagation).
+- Whether the first-pass is triggered by the preprocessor's own code (auto-run on first invocation per build) or by a separate explicit step the user runs.
+- Cache-invalidation strategy — rewire's "warn and require `go clean -cache`" vs an automatic content-hash scheme.
+
+**Start after.** Phase 6 (cross-package obligations) and Phase 9 (`infer.Const`) land. Those two add the biggest repeated work and so make the performance shape concrete.
+
 ## Known risks / open questions
 
 - **Toolexec interface stability.** Go's `cmd/compile` args shape is not a stable API. Watch release notes; pin fallback behavior for unknown flags.
