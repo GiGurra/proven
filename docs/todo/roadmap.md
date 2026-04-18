@@ -71,21 +71,35 @@ Roughly sequential — each phase relies on the previous — but the harness tol
 
 **Fixtures.** `const_literal_ok`, `const_pure_function_ok`, `const_impure_fails`.
 
-### Phase X — Parallel-safe sharing / shared-pass optimization (deferred)
+### Phase X — Shared compile-time relations / cacheable lookup (deferred)
 
-**Goal.** Avoid redundant parse and scan work across concurrent preprocessor invocations without breaking the toolexec model, which assumes each compile is an independent process.
+**Goal.** Consolidate the stable, program-wide knowledge the preprocessor consumes into a single cacheable lookup so repeated per-compile work collapses to a table read, while keeping flow-sensitive per-caller analysis naturally parallel.
 
-Context. `go build -p N` runs up to N package compiles concurrently, each invoking the preprocessor as a separate OS process. Today every invocation re-parses its own sources from disk and re-scans them, even when neighbour invocations just did the same work for the same imported packages (for the cross-package summaries Phase 6 will need) or even the same file (cgo-generated helpers compiled once per build variant, for example). As the module grows and Phases 6/7/9 layer on more per-package analyses, the duplicated work compounds.
+The right abstraction is intentionally not pinned by this phase — when we dig into it with Phases 6, 7, and 9 landed the concrete shape will be more obvious than anything we could commit to now. What this phase captures is the opportunity, the axis of separation, and some directions worth evaluating.
 
-Shape of the solution. Rewire's answer is a first single-threaded pass that scans the whole module's test sources once and caches the result keyed by parent PID. We can do the same for proven's module-wide obligation and inference-rule tables — that cost is paid once even though N compiles read the cache — and keep the per-compile work as just the caller-side discharge for that package's own call sites. Other shapes worth considering: a side-channel file server (a short-lived daemon that arbitrates the first-read-wins cache), embedding the summary as a byte slice in the compiled object, or leaning on GOCACHE with a proven-owned subdirectory keyed by source hash.
+Context. `go build -p N` runs up to N package compiles concurrently, each invoking the preprocessor as a separate OS process. Today every invocation re-derives the same facts about shared packages independently: obligation signatures, declared inference rules, the implication closure the rules compose into, and (once Phase 6 lands) per-callee summaries for everything an imported package exports. As the module grows and Phases 6/7/9 layer on more per-package analyses, the duplicated work compounds.
+
+Axis of separation the phase should preserve.
+
+- **Stable / globally-shareable knowledge** — read-mostly, canonical, cacheable across compiles and across builds. The obligation summary for a function, the predicates declared in an inference rule, the implication graph those rules compose into, predicate-to-predicate compatibility (which predicates' outputs feed which obligations' inputs, transitively). These are properties of the source, not of any one caller.
+- **Flow-sensitive caller analysis** — per-function, per-call-site. What facts does *this* caller establish before *this* call? Trivially parallel across packages once the stable-knowledge layer is a lookup, and not worth sharing — by the time you've looked up the callee's obligation signature, you already have what you need to answer the question locally.
+
+What to resist. Layering caches on top of the existing scanner and rule consumer as they are today will look like it works and underdeliver. The real move is finding the clean unified representation of "what is known about this predicate / function / type", computing it once at the right scope (build? module? source hash?), and letting every subsequent query — from any preprocessor process, possibly across builds — reduce to a lookup.
+
+Directions worth evaluating when the time comes.
+
+- One central relation table: function → obligation signature; predicate → implied predicates (with context); predicate pair → compatibility. Stored once per build, read by every compile.
+- Content-addressed cache keyed by source hash, invalidated the same way Go's own build cache invalidates.
+- Rewire-style first-pass: a single-threaded scan of the whole module writes the table; every compile afterwards reads it. PID-keyed for the hot path, fallback to on-demand scan for any gap.
+- Side-channel daemon that arbitrates a first-read-wins cache during a single `go build` invocation.
 
 Boundaries to draw before implementing.
 
-- Which work is per-package-pure (can run fully in parallel with no coordination — e.g. the caller-side discharge for one package, given a stable callee summary) vs which needs a synchronized join (the module-wide summary table, the implication graph, the cross-package fact propagation).
-- Whether the first-pass is triggered by the preprocessor's own code (auto-run on first invocation per build) or by a separate explicit step the user runs.
+- Exactly which facts are stable vs flow-sensitive — the split above is directional, not precise.
+- Who triggers the first pass: the preprocessor itself on first-invocation-per-build, or a separate explicit step the user runs, or lazily on-demand with coordination.
 - Cache-invalidation strategy — rewire's "warn and require `go clean -cache`" vs an automatic content-hash scheme.
 
-**Start after.** Phase 6 (cross-package obligations) and Phase 9 (`infer.Const`) land. Those two add the biggest repeated work and so make the performance shape concrete.
+**Start after.** Phases 6 (cross-package obligations) and 9 (`infer.Const`) land. Those two make the performance shape concrete. Until then the best cache is the one we don't yet need.
 
 ## Known risks / open questions
 
