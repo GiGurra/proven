@@ -76,8 +76,15 @@ func (fs *FactSet) Clone() *FactSet {
 
 // CallDischarge records the obligation-discharge status for one
 // call site analyzed against the caller's flow facts.
+//
+// CalleePkg is empty for same-package callees and holds the
+// callee's import path for cross-package ones; CalleeKey is the
+// summary key within that package (bare function name, or
+// "Recv.Method" for methods). Together they uniquely identify
+// which callee's obligation signature was consulted.
 type CallDischarge struct {
 	Pos       token.Pos
+	CalleePkg string
 	CalleeKey string
 	Params    []ParamDischarge
 }
@@ -104,19 +111,22 @@ type ParamDischarge struct {
 }
 
 // AnalyzeFunc walks caller's body and returns one CallDischarge
-// per call to a function whose key appears in summary.Funcs.
+// per call to a function whose key appears in summary.Funcs
+// (same-package) or in any of imports[pkg].Funcs (cross-package).
 // Callees without a summary entry (external, or annotated only
 // via proven.Returns with no ParamPreds) produce no entries.
 //
-// The FuncDecl must belong to the package whose summary is passed;
-// cross-package analysis is Phase 6.
-func AnalyzeFunc(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo) []CallDischarge {
+// imports may be nil — same-package-only mode. Tests that do not
+// need cross-package resolution pass nil; Phase 6's compile path
+// assembles the map from the compile's -importcfg.
+func AnalyzeFunc(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo, imports map[string]*PackageSummary) []CallDischarge {
 	if caller.Body == nil {
 		return nil
 	}
 	a := &analyzer{
 		summary:     summary,
 		imp:         imp,
+		imports:     imports,
 		facts:       newFactSet(),
 		proveAlias:  imp.aliasFor(proveImportPath),
 		provenAlias: imp.provenAlias,
@@ -126,10 +136,12 @@ func AnalyzeFunc(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo)
 }
 
 // analyzer owns the mutable fact set, the read-only summary/import
-// context, and the growing list of discharge results.
+// context (including any imported package summaries), and the
+// growing list of discharge results.
 type analyzer struct {
 	summary     *PackageSummary
 	imp         *importInfo
+	imports     map[string]*PackageSummary
 	facts       *FactSet
 	out         []CallDischarge
 	proveAlias  string
@@ -398,16 +410,18 @@ func (a *analyzer) walkCalls(expr ast.Expr) {
 }
 
 // recordCallDischarge looks up the callee's summary (if any) and
-// produces a CallDischarge for the call site. Callees whose name
-// is not in summary.Funcs produce no entry: either they are not
-// annotated (nothing to discharge) or they are external (Phase 6
-// scope).
+// produces a CallDischarge for the call site. Callees whose key
+// is not in the corresponding summary's Funcs produce no entry:
+// either they are not annotated (nothing to discharge), or they
+// are from an external package whose summary is not in
+// a.imports (typical for stdlib and third-party code the
+// preprocessor has not scanned).
 func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
-	key := calleeKey(call)
-	if key == "" {
+	calleePkg, key, ok := a.resolveCallee(call)
+	if !ok {
 		return
 	}
-	sum, ok := a.summary.Funcs[key]
+	sum, ok := a.lookupCalleeSummary(calleePkg, key)
 	if !ok {
 		return
 	}
@@ -435,9 +449,54 @@ func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
 	}
 	a.out = append(a.out, CallDischarge{
 		Pos:       call.Pos(),
+		CalleePkg: calleePkg,
 		CalleeKey: key,
 		Params:    params,
 	})
+}
+
+// resolveCallee returns (calleePkg, summaryKey, ok) for a call
+// whose callee the analyzer recognizes:
+//
+//   - bare identifier `Foo(...)` — same-package free function or
+//     a package-level var bound to one; calleePkg == "".
+//   - selector `pkg.Foo(...)` where pkg is a known import alias —
+//     cross-package call; calleePkg is the import's path.
+//
+// Method calls on a value receiver are out of scope without type
+// information and return (_, _, false).
+func (a *analyzer) resolveCallee(call *ast.CallExpr) (string, string, bool) {
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		return "", fn.Name, true
+	case *ast.SelectorExpr:
+		x, ok := fn.X.(*ast.Ident)
+		if !ok {
+			return "", "", false
+		}
+		if path, isImport := a.imp.aliases[x.Name]; isImport {
+			return path, fn.Sel.Name, true
+		}
+	}
+	return "", "", false
+}
+
+// lookupCalleeSummary returns the FuncSummary for a resolved
+// callee. Same-package callees (calleePkg "" or matching the
+// current package) look up in a.summary; cross-package ones look
+// up in a.imports[calleePkg]. Missing entries yield (nil, false),
+// meaning "no recorded obligations" — either the callee has none
+// or we never saw its summary at all.
+func (a *analyzer) lookupCalleeSummary(calleePkg, key string) (*FuncSummary, bool) {
+	if calleePkg == "" || calleePkg == a.summary.ImportPath {
+		sum, ok := a.summary.Funcs[key]
+		return sum, ok
+	}
+	if imp, ok := a.imports[calleePkg]; ok {
+		sum, ok := imp.Funcs[key]
+		return sum, ok
+	}
+	return nil, false
 }
 
 // discharged reports whether predicate pred holds on the
@@ -471,7 +530,7 @@ func (a *analyzer) dischargedRec(pred Predicate, varName string, visited map[Pre
 	}
 	visited[pred] = true
 
-	for _, rule := range a.summary.Rules {
+	for _, rule := range a.allRules() {
 		if rule.To != pred {
 			continue
 		}
@@ -486,16 +545,25 @@ func (a *analyzer) dischargedRec(pred Predicate, varName string, visited map[Pre
 	return false
 }
 
-// calleeKey returns the summary key for a call whose callee we can
-// resolve: bare identifiers (same-package free functions or
-// package-level variables) yield the identifier name. Selector
-// expressions (method calls, cross-package calls) return "" —
-// those are outside Phase 3's scope.
-func calleeKey(call *ast.CallExpr) string {
-	if id, ok := call.Fun.(*ast.Ident); ok {
-		return id.Name
+// allRules returns the union of the current package's inference
+// rules and those harvested from every imported package summary.
+// Iteration order is deterministic per analyzer instance but
+// package-import order (not topologically sorted) — rule search
+// is exhaustive so order does not affect correctness.
+func (a *analyzer) allRules() []InferRule {
+	n := len(a.summary.Rules)
+	for _, imp := range a.imports {
+		n += len(imp.Rules)
 	}
-	return ""
+	if n == 0 {
+		return nil
+	}
+	out := make([]InferRule, 0, n)
+	out = append(out, a.summary.Rules...)
+	for _, imp := range a.imports {
+		out = append(out, imp.Rules...)
+	}
+	return out
 }
 
 // applyAssignPostconditions updates the fact set from an
@@ -529,8 +597,8 @@ func (a *analyzer) applyAssignPostconditions(s *ast.AssignStmt) {
 		return
 	}
 	// proven.Returns-annotated callee.
-	if key := calleeKey(call); key != "" {
-		if sum, ok := a.summary.Funcs[key]; ok && len(sum.ReturnPreds) > 0 {
+	if calleePkg, key, ok := a.resolveCallee(call); ok {
+		if sum, ok := a.lookupCalleeSummary(calleePkg, key); ok && len(sum.ReturnPreds) > 0 {
 			for _, lhs := range s.Lhs {
 				if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
 					for _, p := range sum.ReturnPreds {
@@ -572,8 +640,8 @@ func (a *analyzer) applyDeclPostconditions(vs *ast.ValueSpec) {
 	if !ok {
 		return
 	}
-	if key := calleeKey(call); key != "" {
-		if sum, ok := a.summary.Funcs[key]; ok && len(sum.ReturnPreds) > 0 {
+	if calleePkg, key, ok := a.resolveCallee(call); ok {
+		if sum, ok := a.lookupCalleeSummary(calleePkg, key); ok && len(sum.ReturnPreds) > 0 {
 			for _, name := range vs.Names {
 				if name.Name != "_" {
 					for _, p := range sum.ReturnPreds {
@@ -855,7 +923,7 @@ func analyzeSource(importPath, src string) ([]CallDischarge, error) {
 	var all []CallDischarge
 	for _, decl := range f.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
-			all = append(all, AnalyzeFunc(fn, sum, imp)...)
+			all = append(all, AnalyzeFunc(fn, sum, imp, nil)...)
 		}
 	}
 	return all, nil
@@ -900,7 +968,7 @@ func AnalyzePackage(importPath string, sources []string) (*PackageSummary, []Cal
 		imp := collectImports(f)
 		for _, decl := range f.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok {
-				all = append(all, AnalyzeFunc(fn, sum, imp)...)
+				all = append(all, AnalyzeFunc(fn, sum, imp, nil)...)
 			}
 		}
 	}

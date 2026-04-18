@@ -80,8 +80,30 @@ func planCompile(toolPath string, toolArgs []string) (*Plan, error) {
 // or "" if not present. The Go toolchain always emits -p <importpath>
 // as two tokens.
 func compilePkgPath(args []string) string {
+	return compileFlagValue(args, "-p")
+}
+
+// compileOutputPath returns the value of the -o flag in a compile
+// argv, or "" if not present. The Go toolchain emits -o <path> as
+// two tokens and the compile tool refuses to run without it.
+func compileOutputPath(args []string) string {
+	return compileFlagValue(args, "-o")
+}
+
+// compileImportcfg returns the value of the -importcfg flag in a
+// compile argv, or "" if not present (unusual but legal for a
+// package that imports nothing beyond unsafe and builtin).
+func compileImportcfg(args []string) string {
+	return compileFlagValue(args, "-importcfg")
+}
+
+// compileFlagValue is the shared helper behind the per-flag
+// extractors. The compile tool uses the two-token form
+// `-flag value` exclusively (not `-flag=value`); the helper
+// relies on that invariant.
+func compileFlagValue(args []string, flag string) string {
 	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "-p" {
+		if args[i] == flag {
 			return args[i+1]
 		}
 	}

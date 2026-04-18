@@ -104,22 +104,12 @@ func runFixture(t *testing.T, fixtureDir string) {
 	t.Helper()
 	tmp := t.TempDir()
 
-	// Copy .go source files.
-	entries, err := os.ReadDir(fixtureDir)
-	if err != nil {
+	// Copy every .go source file into a mirrored tree under tmp.
+	// Multi-package fixtures place subpackages in subdirectories
+	// (e.g. pkg/callee.go); expected.txt lives at the fixture
+	// root and is excluded here.
+	if err := copyGoTree(fixtureDir, tmp); err != nil {
 		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
-			continue
-		}
-		src, err := os.ReadFile(filepath.Join(fixtureDir, e.Name()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, e.Name()), src, 0o644); err != nil {
-			t.Fatal(err)
-		}
 	}
 
 	// Synthesize a go.mod with a local replace for proven.
@@ -161,6 +151,38 @@ replace github.com/GiGurra/proven => %s
 	if !strings.Contains(got, want) {
 		t.Errorf("build failed but output did not contain expected substring.\nwant substring:\n%s\n---\ngot:\n%s", want, got)
 	}
+}
+
+// copyGoTree walks src and replicates every .go source file at
+// the same relative path under dst. Non-.go files (expected.txt,
+// any extraneous artifacts the fixture author might leave behind)
+// are skipped so the fixture's tmp tree is precisely a Go module
+// source tree. Directories are created as needed.
+func copyGoTree(src, dst string) error {
+	return filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") {
+			return nil
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
 }
 
 func runIn(dir, name string, args ...string) (string, error) {

@@ -73,18 +73,37 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 		scanFile(sum, pkgPath, f)
 	}
 
-	// No obligations → no analysis, no rewriting, no substitution.
-	// The package uses neither proven.That nor proven.Returns in a
-	// way the scanner cares about, so there is nothing to check and
-	// nothing to erase.
-	if len(sum.Funcs) == 0 {
+	// Imported-package summaries. Sidecars written during earlier
+	// per-dependency compiles live next to the .a files the Go
+	// toolchain hands us via -importcfg. Missing sidecars are
+	// silently absent — a package we never scanned (stdlib,
+	// third-party without the preprocessor, or a package with no
+	// obligations that skipped writing) simply contributes nothing
+	// to cross-package discharge. A read error for a present file
+	// is treated as non-fatal for the same reason: the compile
+	// itself will still run; at worst the caller sees an
+	// undischarged-obligation diagnostic the summary would have
+	// cleared.
+	imports, _ := readImportSummaries(compileImportcfg(toolArgs))
+
+	// No obligations and no imported summaries contribute anything
+	// actionable. The package uses neither proven.That nor
+	// proven.Returns in a way the scanner cares about, and no
+	// imported callee's obligations apply here either (the
+	// analyzer records a discharge only when the summary has
+	// ParamPreds, which comes from the callee itself). Nothing
+	// to check, nothing to erase, no sidecar to write.
+	if len(sum.Funcs) == 0 && len(imports) == 0 {
 		return nil, nil
 	}
 
 	// Run discharge analysis. Diagnostics take precedence over
-	// rewriting — a build that is about to fail never gets its
-	// sources rewritten.
-	discharges := analyzePackageFiles(sum, files)
+	// rewriting and sidecar emission — a build that is about to
+	// fail never gets its sources rewritten, and its summary must
+	// not be written because downstream packages would then
+	// discharge against a function whose own callers are still
+	// unproven.
+	discharges := analyzePackageFiles(sum, files, imports)
 	var diags []Diagnostic
 	for _, d := range discharges {
 		if !d.Undischarged() {
@@ -94,6 +113,25 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	}
 	if len(diags) > 0 {
 		return &Plan{Diags: diags}, nil
+	}
+
+	// Emit this package's sidecar so packages that import it (in
+	// the same `go build` invocation) can discharge cross-package
+	// obligations against it. Write is best-effort: a failure to
+	// write does not abort the compile, since downstream will
+	// simply miss the obligation information and over-report
+	// undischarged-ness, which is a soft failure mode we can
+	// surface through later diagnostics rather than this one.
+	if len(sum.Funcs) > 0 || len(sum.Rules) > 0 {
+		_, _ = writeSummarySidecar(compileOutputPath(toolArgs), sum)
+	}
+
+	// Packages with obligations only from imports (no local
+	// scanned Funcs) have nothing to rewrite — rewriting only
+	// touches proven.That / proven.Returns calls in the current
+	// package's own source.
+	if len(sum.Funcs) == 0 {
+		return nil, nil
 	}
 
 	// All obligations discharged. Rewrite every file that actually
@@ -123,14 +161,17 @@ func parsePackageSources(sources []string) (*token.FileSet, []*ast.File, error) 
 // analyzePackageFiles runs the flow-sensitive analyzer over every
 // FuncDecl in every file, against the shared package summary.
 // Factored out so planUserPackage can interleave rewriting after
-// discharge without re-parsing.
-func analyzePackageFiles(sum *PackageSummary, files []*ast.File) []CallDischarge {
+// discharge without re-parsing. imports maps each imported
+// package's import path to its PackageSummary (read from its
+// sidecar during the compile of the current package) so
+// cross-package obligations participate in discharge.
+func analyzePackageFiles(sum *PackageSummary, files []*ast.File, imports map[string]*PackageSummary) []CallDischarge {
 	var all []CallDischarge
 	for _, f := range files {
 		imp := collectImports(f)
 		for _, decl := range f.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok {
-				all = append(all, AnalyzeFunc(fn, sum, imp)...)
+				all = append(all, AnalyzeFunc(fn, sum, imp, imports)...)
 			}
 		}
 	}
@@ -245,9 +286,15 @@ func lastIndex(s, sub string) int {
 // predicate is missing so the fix is obvious. currentPkg is the
 // import path of the package being analyzed; predicates defined
 // there render as bare names, imported ones keep a short package
-// qualifier.
+// qualifier. Cross-package callees likewise render with their
+// short package prefix so readers can tell where the obligation
+// originates.
 func dischargeDiagnostics(d CallDischarge, fset *token.FileSet, currentPkg string) []Diagnostic {
 	pos := fset.Position(d.Pos)
+	callee := d.CalleeKey
+	if d.CalleePkg != "" && d.CalleePkg != currentPkg {
+		callee = lastPathSegment(d.CalleePkg) + "." + d.CalleeKey
+	}
 	var out []Diagnostic
 	for _, p := range d.Params {
 		for _, missing := range p.Missing {
@@ -257,7 +304,7 @@ func dischargeDiagnostics(d CallDischarge, fset *token.FileSet, currentPkg strin
 				Col:  pos.Column,
 				Msg: fmt.Sprintf(
 					"proven: undischarged predicate %s on parameter %d of %s",
-					predicateLabel(missing, currentPkg), p.ParamIdx, d.CalleeKey,
+					predicateLabel(missing, currentPkg), p.ParamIdx, callee,
 				),
 			})
 		}
