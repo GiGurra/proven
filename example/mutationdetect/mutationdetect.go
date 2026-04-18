@@ -8,6 +8,10 @@ func NeedsNonNil(intPtr *int) {
 	proven.That(intPtr, proven.NonNil)
 }
 
+type PtrHolder struct {
+	Value *int
+}
+
 func Foo() {
 	x := new(1)
 	if x != nil {
@@ -15,6 +19,11 @@ func Foo() {
 		//x = nil // also makes it not compile
 		//Foo2(x) // still compiles with this.
 		NeedsNonNil(x)
+	}
+
+	holder := PtrHolder{}
+	if holder.Value != nil {
+		NeedsNonNil(holder.Value)
 	}
 }
 

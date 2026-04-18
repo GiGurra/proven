@@ -64,15 +64,13 @@ type Fact struct {
 	Var  string
 }
 
-// FactSet is an unordered set of facts. The underlying maps are not
-// exposed; callers use Add, Has, Clone, and the Or-equivalents.
-//
-// The leaf fact map stores each (Predicate, Var) pair asserted on a
-// variable at a program point. The ors map stores disjunctive facts:
-// keyed by Var, each entry is a sorted Predicate key ("pkg|name|…")
-// identifying one proven.Or(alts...) fact established on that
-// variable. A disjunctive obligation discharges iff any alt has a
-// leaf fact or matches a disjunctive fact's key structurally.
+// FactSet is a compact intermediate used only by collectGuardFacts
+// and the emit-as-sources helpers. It carries the (predicate, var)
+// pairs (and disjunctive equivalents) that a guard expression proves
+// when true, so they can be emitted as Source events at the branch
+// boundary. The previous full-featured implementation (Has, Clone,
+// Forget, etc.) was retired with the FactSet-based resolver in
+// Phase 3; only the accumulator surface remains.
 type FactSet struct {
 	m   map[Fact]struct{}
 	ors map[string]map[string][]Predicate
@@ -85,76 +83,8 @@ func newFactSet() *FactSet {
 	}
 }
 
+// Add records a leaf fact in the set; duplicates are coalesced.
 func (fs *FactSet) Add(f Fact) { fs.m[f] = struct{}{} }
-func (fs *FactSet) Has(pred Predicate, v string) bool {
-	_, ok := fs.m[Fact{Pred: pred, Var: v}]
-	return ok && v != ""
-}
-
-// AddOr records a disjunctive fact `alts-OR` on variable v. Alt
-// order is normalized so Or(a, b) and Or(b, a) collide on the same
-// key; the alts slice is stored verbatim so return-fact snapshots
-// can recover the original alt list for intersection.
-func (fs *FactSet) AddOr(alts []Predicate, v string) {
-	if v == "" || len(alts) == 0 {
-		return
-	}
-	key := orKey(alts)
-	m := fs.ors[v]
-	if m == nil {
-		m = make(map[string][]Predicate)
-		fs.ors[v] = m
-	}
-	if _, exists := m[key]; !exists {
-		m[key] = append([]Predicate(nil), alts...)
-	}
-}
-
-// Forget drops every fact recorded on v (leaf and disjunctive).
-// Called when v is reassigned, incremented, or otherwise mutated in
-// a way that could invalidate prior facts — the analyzer gives up
-// on the stored facts rather than trying to figure out which ones
-// still hold.
-func (fs *FactSet) Forget(v string) {
-	if v == "" {
-		return
-	}
-	for k := range fs.m {
-		if k.Var == v {
-			delete(fs.m, k)
-		}
-	}
-	delete(fs.ors, v)
-}
-
-// HasOr reports whether an exact-match disjunctive fact is recorded
-// on v (same set of alts, alt order irrelevant).
-func (fs *FactSet) HasOr(alts []Predicate, v string) bool {
-	if v == "" || len(alts) == 0 {
-		return false
-	}
-	m, ok := fs.ors[v]
-	if !ok {
-		return false
-	}
-	_, ok = m[orKey(alts)]
-	return ok
-}
-
-func (fs *FactSet) Clone() *FactSet {
-	out := newFactSet()
-	for f := range fs.m {
-		out.m[f] = struct{}{}
-	}
-	for v, m := range fs.ors {
-		dup := make(map[string][]Predicate, len(m))
-		for k, alts := range m {
-			dup[k] = alts
-		}
-		out.ors[v] = dup
-	}
-	return out
-}
 
 // orKey builds a canonical comparison key for a set of Or-alts.
 // Predicates are rendered as "pkg|name" and sorted so alt order is
@@ -251,49 +181,36 @@ func AnalyzeFuncWithReturns(caller *ast.FuncDecl, summary *PackageSummary, imp *
 		summary:     summary,
 		imp:         imp,
 		imports:     imports,
-		facts:       seedFactsFromPreconditions(caller, summary),
+		rec:         newEventRecorder(),
 		proveAlias:  imp.aliasFor(proveImportPath),
 		trustAlias:  imp.aliasFor(trustImportPath),
 		provenAlias: imp.provenAlias,
 		fset:        fset,
 		diags:       diags,
 	}
+	a.seedEventsFromPreconditions(caller, summary)
 	a.analyzeBlock(caller.Body)
 	leaves, ors := a.intersectReturns()
 	return a.out, leaves, ors
 }
 
-// seedFactsFromPreconditions returns the initial FactSet for
-// analyzing caller's body. Each `proven.That(param, pred)` at the
-// top of caller's body — which the scanner already recorded in
-// summary.Funcs[caller.key].ParamPreds[i] — is a precondition every
-// caller has already discharged at its call site, so inside
-// caller's body the predicate holds on the corresponding parameter
-// as a starting fact. Seeding this lets two things work:
-//
-//  1. `return proven.Returns(x, pred)` validates against the
-//     function's own declared precondition on x.
-//  2. A function that declares a precondition and internally
-//     forwards the parameter to another function requiring the
-//     same precondition discharges without re-guarding.
-//
-// Functions without a summary entry (no obligations declared)
-// start with an empty fact set — no facts to seed. Parameters
-// whose declared preconditions refer to predicates the analyzer
-// cannot find are still faithfully seeded; the point is that the
-// caller has promised those predicates hold, irrespective of
-// whether the local analyzer would accept the predicate identity
-// elsewhere.
-func seedFactsFromPreconditions(caller *ast.FuncDecl, summary *PackageSummary) *FactSet {
-	facts := newFactSet()
-	if summary == nil {
-		return facts
+// seedEventsFromPreconditions
+// into the event stream: each parameter precondition of the caller
+// itself is emitted as a source event at the function body's
+// opening-brace position in the root scope. Keeps the stream's
+// visibility semantics consistent — a body-level query can see
+// precondition-seeded facts because they live in ancestor-or-self
+// scope and precede the walk.
+func (a *analyzer) seedEventsFromPreconditions(caller *ast.FuncDecl, summary *PackageSummary) {
+	if summary == nil || caller.Body == nil {
+		return
 	}
 	key := funcDeclKey(caller)
 	fsum, ok := summary.Funcs[key]
 	if !ok || fsum == nil {
-		return facts
+		return
 	}
+	pos := caller.Body.Lbrace
 	paramNames := paramNamesByIndex(caller.Type)
 	for idx, preds := range fsum.ParamPreds {
 		name, ok := paramNames[idx]
@@ -301,7 +218,7 @@ func seedFactsFromPreconditions(caller *ast.FuncDecl, summary *PackageSummary) *
 			continue
 		}
 		for _, p := range preds {
-			facts.Add(Fact{Pred: p, Var: name})
+			a.rec.sourceLeaf(pos, p, name)
 		}
 	}
 	for idx, ors := range fsum.ParamOrs {
@@ -310,10 +227,9 @@ func seedFactsFromPreconditions(caller *ast.FuncDecl, summary *PackageSummary) *
 			continue
 		}
 		for _, alts := range ors {
-			facts.AddOr(alts, name)
+			a.rec.sourceOr(pos, alts, name)
 		}
 	}
-	return facts
 }
 
 // funcDeclKey reproduces the FuncSummary.Key() computation starting
@@ -354,14 +270,18 @@ func paramNamesByIndex(ft *ast.FuncType) map[int]string {
 	return out
 }
 
-// analyzer owns the mutable fact set, the read-only summary/import
-// context (including any imported package summaries), and the
-// growing list of discharge results.
+// analyzer owns the event-stream recorder, the read-only
+// summary/import context (including any imported package summaries),
+// and the growing list of discharge results.
+//
+// Phase 3 of the demand-driven restructure removed the parallel
+// FactSet — all fact-mutation and fact-query paths now go through
+// the recorded event stream and the on-demand backward resolver.
 type analyzer struct {
 	summary     *PackageSummary
 	imp         *importInfo
 	imports     map[string]*PackageSummary
-	facts       *FactSet
+	rec         *eventRecorder
 	out         []CallDischarge
 	proveAlias  string
 	trustAlias  string
@@ -449,7 +369,7 @@ func (a *analyzer) analyzeStmt(stmt ast.Stmt) {
 		}
 	case *ast.IncDecStmt:
 		if id, ok := s.X.(*ast.Ident); ok && id.Name != "_" {
-			a.facts.Forget(id.Name)
+			a.rec.write(id.Pos(), id.Name)
 		}
 	case *ast.DeclStmt:
 		if gen, ok := s.Decl.(*ast.GenDecl); ok {
@@ -468,33 +388,36 @@ func (a *analyzer) analyzeStmt(stmt ast.Stmt) {
 		}
 		a.snapshotReturn(s)
 	case *ast.BlockStmt:
-		saved := a.facts.Clone()
+		prevScope := a.rec.enterScope()
 		a.analyzeBlock(s)
-		a.facts = saved
+		a.rec.leaveScope(prevScope)
 	case *ast.ForStmt:
-		saved := a.facts.Clone()
+		prevScope := a.rec.enterScope()
 		if s.Body != nil {
 			a.analyzeBlock(s.Body)
 		}
-		a.facts = saved
+		a.rec.leaveScope(prevScope)
 	case *ast.RangeStmt:
-		saved := a.facts.Clone()
+		prevScope := a.rec.enterScope()
 		if s.Body != nil {
 			a.analyzeBlock(s.Body)
 		}
-		a.facts = saved
+		a.rec.leaveScope(prevScope)
 	case *ast.SwitchStmt:
-		saved := a.facts.Clone()
 		if s.Body != nil {
+			// Each case clause is its own branch sibling — open a
+			// fresh scope per clause so facts established inside
+			// one case do not leak into the next.
 			for _, cc := range s.Body.List {
 				if cl, ok := cc.(*ast.CaseClause); ok {
+					prevScope := a.rec.enterScope()
 					for _, cs := range cl.Body {
 						a.analyzeStmt(cs)
 					}
+					a.rec.leaveScope(prevScope)
 				}
 			}
 		}
-		a.facts = saved
 	}
 }
 
@@ -515,15 +438,15 @@ func (a *analyzer) forgetLHS(lhs ast.Expr) {
 	switch e := lhs.(type) {
 	case *ast.Ident:
 		if e.Name != "_" {
-			a.facts.Forget(e.Name)
+			a.rec.write(e.Pos(), e.Name)
 		}
 	case *ast.SelectorExpr:
 		if root := selectorChainRoot(e); root != "" {
-			a.facts.Forget(root)
+			a.rec.write(e.Pos(), root)
 		}
 	case *ast.IndexExpr:
 		if id, ok := e.X.(*ast.Ident); ok && id.Name != "_" {
-			a.facts.Forget(id.Name)
+			a.rec.write(e.Pos(), id.Name)
 		}
 	}
 }
@@ -565,7 +488,7 @@ func (a *analyzer) invalidateAddrEscape(expr ast.Expr) {
 			return true
 		}
 		if id, ok := u.X.(*ast.Ident); ok && id.Name != "_" {
-			a.facts.Forget(id.Name)
+			a.rec.write(u.Pos(), id.Name)
 		}
 		return true
 	})
@@ -586,22 +509,24 @@ func (a *analyzer) invalidateAddrEscape(expr ast.Expr) {
 // for conservatism (false negatives are safe here — they just
 // reduce what the analyzer can discharge, never what it accepts).
 func (a *analyzer) analyzeIf(ifStmt *ast.IfStmt) {
-	saved := a.facts.Clone()
 	guardFacts := newFactSet()
 	collectGuardFacts(ifStmt.Cond, a.imp, a.summary.ImportPath, false, guardFacts)
-
-	// then-branch sees current facts ∪ guardFacts.
-	a.facts = unionFacts(saved, guardFacts)
-	a.analyzeBlock(ifStmt.Body)
-	thenEscapes := blockAlwaysEscapes(ifStmt.Body)
-
-	// Optional else-branch: collect negated facts (only useful for
-	// "if !pred(x)" shape — collectGuardFacts knows how to negate).
-	elseEscapes := false
 	negFacts := newFactSet()
 	collectGuardFacts(ifStmt.Cond, a.imp, a.summary.ImportPath, true, negFacts)
+
+	// then-branch opens its own scope; guard facts live inside it.
+	thenScope := a.rec.enterScope()
+	a.emitFactSetAsSources(guardFacts, ifStmt.Cond.Pos())
+	a.analyzeBlock(ifStmt.Body)
+	a.rec.leaveScope(thenScope)
+	thenEscapes := blockAlwaysEscapes(ifStmt.Body)
+
+	// Optional else-branch: negated guard facts live in a sibling
+	// scope to the then-branch, so the two do not cross-pollinate.
+	elseEscapes := false
 	if ifStmt.Else != nil {
-		a.facts = unionFacts(saved, negFacts)
+		elseScope := a.rec.enterScope()
+		a.emitFactSetAsSources(negFacts, ifStmt.Cond.Pos())
 		switch e := ifStmt.Else.(type) {
 		case *ast.BlockStmt:
 			a.analyzeBlock(e)
@@ -611,31 +536,37 @@ func (a *analyzer) analyzeIf(ifStmt *ast.IfStmt) {
 			// Nested if-else chains: conservatively treat as
 			// non-escaping so later facts are not over-claimed.
 		}
+		a.rec.leaveScope(elseScope)
 	}
 
-	// Post-if fact set:
+	// Post-if join: when exactly one branch always escapes, the
+	// opposite branch's guard-facts "survive" into the enclosing
+	// scope as if the escaping branch had never been taken. Emit
+	// them at the if-statement's closing position in the current
+	// (enclosing) scope so follow-on code sees them.
+	postPos := ifStmt.End()
 	switch {
 	case thenEscapes && !elseEscapes:
-		// then always exits; the continuation is the else-path,
-		// whose facts are the negated guard.
-		a.facts = unionFacts(saved, negFacts)
+		a.emitFactSetAsSources(negFacts, postPos)
 	case !thenEscapes && elseEscapes:
-		// else always exits; the continuation is the then-path.
-		a.facts = unionFacts(saved, guardFacts)
-	default:
-		// Neither or both escape: nothing can be concluded about
-		// the joined state, so restore to pre-if facts.
-		a.facts = saved
+		a.emitFactSetAsSources(guardFacts, postPos)
 	}
 }
 
-// unionFacts returns a new FactSet containing every fact in a or b.
-func unionFacts(a, b *FactSet) *FactSet {
-	out := a.Clone()
-	for f := range b.m {
-		out.m[f] = struct{}{}
+// emitFactSetAsSources mirrors the leaves / Or-facts inside fs as
+// source events at pos in the current scope. Called at each site
+// where the FactSet-based analyzer would union a derived FactSet
+// (guard facts, negated-guard facts, post-if-join facts) into the
+// live state.
+func (a *analyzer) emitFactSetAsSources(fs *FactSet, pos token.Pos) {
+	for f := range fs.m {
+		a.rec.sourceLeaf(pos, f.Pred, f.Var)
 	}
-	return out
+	for v, m := range fs.ors {
+		for _, alts := range m {
+			a.rec.sourceOr(pos, alts, v)
+		}
+	}
 }
 
 // collectGuardFacts walks a boolean expression used as an
@@ -670,7 +601,7 @@ func collectGuardFacts(expr ast.Expr, imp *importInfo, importPath string, negate
 		// require proven.NonNil (or Nil) are satisfied without a
 		// redundant predicate call in the guard.
 		if e.Op == token.NEQ || e.Op == token.EQL {
-			if v, ok := nilCompareVar(e); ok {
+			if v, ok := nilCompareVar(e, imp); ok {
 				isNonNil := (e.Op == token.NEQ) != negated
 				name := "Nil"
 				if isNonNil {
@@ -695,32 +626,34 @@ func collectGuardFacts(expr ast.Expr, imp *importInfo, importPath string, negate
 	}
 }
 
-// nilCompareVar reports the variable name on one side of a `x != nil`
+// nilCompareVar reports the canonical-key subject of a `x != nil`
 // or `x == nil` BinaryExpr, accepting either order (`nil != x` works
-// too). Returns (_, false) when neither side is the bare `nil`
-// identifier or when the other side is not a plain identifier.
-func nilCompareVar(e *ast.BinaryExpr) (string, bool) {
-	lhsID, lhsIsIdent := e.X.(*ast.Ident)
-	rhsID, rhsIsIdent := e.Y.(*ast.Ident)
-	isNilIdent := func(id *ast.Ident) bool { return id != nil && id.Name == "nil" }
+// too) and either identifier or selector-chain subjects. Returns
+// (_, false) when neither side is the bare `nil` identifier or when
+// the other side does not canonicalize to a tracked expression key.
+func nilCompareVar(e *ast.BinaryExpr, imp *importInfo) (string, bool) {
+	isNilIdent := func(expr ast.Expr) bool {
+		id, ok := expr.(*ast.Ident)
+		return ok && id.Name == "nil"
+	}
 	switch {
-	case rhsIsIdent && isNilIdent(rhsID) && lhsIsIdent && !isNilIdent(lhsID):
-		return lhsID.Name, true
-	case lhsIsIdent && isNilIdent(lhsID) && rhsIsIdent && !isNilIdent(rhsID):
-		return rhsID.Name, true
+	case isNilIdent(e.Y):
+		return exprKey(e.X, imp)
+	case isNilIdent(e.X):
+		return exprKey(e.Y, imp)
 	}
 	return "", false
 }
 
 // callAsPredicate matches a call expression of the form
-// `predIdent(x)` or `pkgAlias.Pred(x)` where x is a single
-// identifier, and returns the resolved predicate identity plus
-// the subject variable name.
+// `predIdent(x)` or `pkgAlias.Pred(x)` where x canonicalizes to a
+// tracked expression key (identifier or selector chain), and returns
+// the resolved predicate identity plus the subject key.
 func callAsPredicate(call *ast.CallExpr, imp *importInfo, importPath string) (Predicate, string, bool) {
 	if len(call.Args) != 1 {
 		return Predicate{}, "", false
 	}
-	arg, ok := call.Args[0].(*ast.Ident)
+	subject, ok := exprKey(call.Args[0], imp)
 	if !ok {
 		return Predicate{}, "", false
 	}
@@ -728,7 +661,7 @@ func callAsPredicate(call *ast.CallExpr, imp *importInfo, importPath string) (Pr
 	if !ok {
 		return Predicate{}, "", false
 	}
-	return pred, arg.Name, true
+	return pred, subject, true
 }
 
 // blockAlwaysEscapes reports whether a block's control flow
@@ -835,11 +768,15 @@ func (a *analyzer) verifyProvenReturns(call *ast.CallExpr) {
 			continue
 		}
 		for _, pred := range leaves {
+			// Emit a query event before checking so the resolver
+			// can anchor its backward walk to the current scope.
+			a.rec.queryLeaf(call.Pos(), pred, valueID.Name, -1, -1)
 			if !a.discharged(pred, valueID.Name) {
 				reportUnprovenReturns(a.diags, a.fset, call, pred, valueID.Name, a.summary.ImportPath)
 			}
 		}
 		for _, alts := range ors {
+			a.rec.queryOr(call.Pos(), alts, valueID.Name, -1, -1)
 			if !a.dischargedOr(alts, valueID.Name) {
 				reportUnprovenReturnsOr(a.diags, a.fset, call, alts, valueID.Name, a.summary.ImportPath)
 			}
@@ -960,6 +897,10 @@ func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
 		return
 	}
 	indices := paramIndicesUnion(sum)
+	// dischargeIdx is the zero-based index this call will occupy in
+	// a.out once appended below; used to stitch the associated query
+	// events back to the CallDischarge record in later phases.
+	dischargeIdx := len(a.out)
 	var params []ParamDischarge
 	for _, idx := range indices {
 		if idx >= len(call.Args) {
@@ -971,12 +912,14 @@ func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
 
 		var missing []Predicate
 		for _, p := range required {
+			a.rec.queryLeaf(call.Args[idx].Pos(), p, argName, dischargeIdx, idx)
 			if !a.discharged(p, argName) {
 				missing = append(missing, p)
 			}
 		}
 		var missingOrs [][]Predicate
 		for _, alts := range requiredOrs {
+			a.rec.queryOr(call.Args[idx].Pos(), alts, argName, dischargeIdx, idx)
 			if !a.dischargedOr(alts, argName) {
 				missingOrs = append(missingOrs, append([]Predicate(nil), alts...))
 			}
@@ -1055,8 +998,8 @@ func paramIndicesUnion(sum *FuncSummary) []int {
 // statements. Only one level of nesting is examined per argument;
 // deeper chains rely on the analyzer's own cascading recordCallDischarge.
 func (a *analyzer) bindArgForCheck(arg ast.Expr, idx int, required []Predicate, requiredOrs [][]Predicate) (string, func()) {
-	if name, ok := identName(arg); ok {
-		return name, noRestore
+	if key, ok := exprKey(arg, a.imp); ok {
+		return key, noRestore
 	}
 	if inner, ok := arg.(*ast.CallExpr); ok {
 		if pkg, key, ok := a.resolveCallee(inner); ok {
@@ -1100,20 +1043,31 @@ func (a *analyzer) evalLiterals(arg ast.Expr, required []Predicate, requiredOrs 
 	return out
 }
 
-// plantVirtual clones the fact set, adds leaves and ors on a
-// synthetic `$argN` variable, and returns the name plus a restore
-// closure that puts the original fact set back.
+// plantVirtual clones the fact set, opens a throw-away scope, adds
+// leaves and ors on a synthetic `$argN` variable, and returns the
+// name plus a restore closure that puts the original fact set and
+// scope back.
+//
+// The throw-away scope is the key mechanism for keeping virtual
+// facts from leaking into later queries: the queries generated for
+// this parameter check are emitted inside the throw-away scope and
+// see the virtual sources as ancestors; later queries (for the next
+// parameter, or after the call) are emitted in an outer scope that
+// is a non-descendant of the throw-away scope, so the virtual
+// sources are invisible to them.
 func (a *analyzer) plantVirtual(idx int, leaves []Predicate, ors [][]Predicate) (string, func()) {
-	saved := a.facts
-	a.facts = saved.Clone()
 	vname := fmt.Sprintf("$arg%d", idx)
+	prevScope := a.rec.enterScope()
+	pos := token.NoPos
 	for _, p := range leaves {
-		a.facts.Add(Fact{Pred: p, Var: vname})
+		a.rec.sourceLeaf(pos, p, vname)
 	}
 	for _, alts := range ors {
-		a.facts.AddOr(alts, vname)
+		a.rec.sourceOr(pos, alts, vname)
 	}
-	return vname, func() { a.facts = saved }
+	return vname, func() {
+		a.rec.leaveScope(prevScope)
+	}
 }
 
 func noRestore() {}
@@ -1163,31 +1117,23 @@ func (a *analyzer) lookupCalleeSummary(calleePkg, key string) (*FuncSummary, boo
 }
 
 // discharged reports whether predicate pred holds on the
-// identifier named varName, either as a direct fact or by
-// implication through the declared inference rules.
+// identifier named varName at the current emission point, either
+// as a direct fact or by implication through the declared inference
+// rules. Delegates to the event-stream resolver introduced in Phase
+// 3; the call is kept as a tiny shim because most of the analyzer's
+// internal paths still consult it by name.
 //
-// An implication chain succeeds when a rule whose To is pred can
-// be closed: its From predicate holds on varName (possibly
-// through another chain) and, when present, its Given context
-// also holds on varName. Unknown / not-in-scope variable names
-// ("" from non-ident arguments) never discharge anything.
-//
-// Cycle-safe: a visited set collects every predicate the query
-// has already attempted to prove on this variable, so a
-// pathological A ⇒ B ⇒ A ruleset returns false without
-// recursing forever. The visited marker is per top-level query,
-// so an independent later query starts fresh.
+// Unknown / not-in-scope variable names ("" from non-ident
+// arguments) never discharge anything.
 func (a *analyzer) discharged(pred Predicate, varName string) bool {
-	if varName == "" {
-		return false
-	}
-	return a.dischargedRec(pred, varName, make(map[Predicate]bool))
+	return a.dischargedViaEvents(pred, varName)
 }
 
 // snapshotReturn records the fact set on a return's first result.
 //
-// If the result is an identifier, collect every leaf fact on that
-// identifier plus every Or-fact on it. Otherwise (literal, multi-
+// If the result is an identifier, collect every leaf fact and every
+// Or-fact visible on that identifier at the return point, using the
+// event-stream resolver's backward walk. Otherwise (literal, multi-
 // value return, expression) record an empty snapshot — the sound
 // intersection rule will collapse the function's derived
 // postconditions to nothing across a function that sometimes
@@ -1205,18 +1151,11 @@ func (a *analyzer) snapshotReturn(s *ast.ReturnStmt) {
 		a.returnSnapshots = append(a.returnSnapshots, returnSnapshot{})
 		return
 	}
-	snap := returnSnapshot{}
-	for f := range a.facts.m {
-		if f.Var == id.Name {
-			snap.leaves = append(snap.leaves, f.Pred)
-		}
-	}
-	if altMap, ok := a.facts.ors[id.Name]; ok {
-		for _, alts := range altMap {
-			snap.ors = append(snap.ors, append([]Predicate(nil), alts...))
-		}
-	}
-	a.returnSnapshots = append(a.returnSnapshots, snap)
+	leaves, ors := a.snapshotFactsOnVarViaEvents(id.Name)
+	a.returnSnapshots = append(a.returnSnapshots, returnSnapshot{
+		leaves: leaves,
+		ors:    ors,
+	})
 }
 
 // intersectReturns returns the leaf-predicate and Or-alt
@@ -1317,79 +1256,23 @@ func returnFacts(sum *FuncSummary) ([]Predicate, [][]Predicate) {
 // plantTrailingFacts adds every leaf and disjunctive fact carried
 // by tp as a fact on variable v. Shared between the prove.Must /
 // trust.That assignment sites so the Or-handling stays in one place.
-func (a *analyzer) plantTrailingFacts(tp TrailingPreds, v string) {
+// pos is the source position used when emitting the parallel event
+// stream entries.
+func (a *analyzer) plantTrailingFacts(tp TrailingPreds, v string, pos token.Pos) {
 	for _, p := range tp.Leaves {
-		a.facts.Add(Fact{Pred: p, Var: v})
+		a.rec.sourceLeaf(pos, p, v)
 	}
 	for _, alts := range tp.Ors {
-		a.facts.AddOr(alts, v)
+		a.rec.sourceOr(pos, alts, v)
 	}
 }
 
 // dischargedOr reports whether a disjunctive obligation (`Or(alts...)`)
-// holds on varName. Two paths succeed:
-//
-//   - Any alt is `a.discharged` on varName — a stronger fact implies
-//     the Or.
-//   - The fact set already carries a structural-equality Or-fact
-//     matching alts on varName (sorted / alt-order-insensitive) —
-//     the fact directly asserts the disjunction.
-//
-// An empty alts list never discharges.
+// holds on varName at the current emission point. Delegates to the
+// event-stream resolver; kept as a shim so in-place callers stay
+// unchanged.
 func (a *analyzer) dischargedOr(alts []Predicate, varName string) bool {
-	if varName == "" || len(alts) == 0 {
-		return false
-	}
-	for _, p := range alts {
-		if a.discharged(p, varName) {
-			return true
-		}
-	}
-	return a.facts.HasOr(alts, varName)
-}
-
-func (a *analyzer) dischargedRec(pred Predicate, varName string, visited map[Predicate]bool) bool {
-	if a.facts.Has(pred, varName) {
-		return true
-	}
-	if visited[pred] {
-		return false
-	}
-	visited[pred] = true
-
-	for _, rule := range a.allRules() {
-		if !ruleConcludes(rule, pred) {
-			continue
-		}
-		if !a.allDischarge(rule.From, varName, visited) {
-			continue
-		}
-		if len(rule.Given) > 0 && !a.allDischarge(rule.Given, varName, visited) {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-// ruleConcludes reports whether pred appears in rule.To — i.e. the
-// rule is a candidate for deriving pred. Multi-conclusion rules
-// (AND-composed To) are treated as independently concluding each of
-// their listed predicates.
-func ruleConcludes(rule InferRule, pred Predicate) bool {
-	return slices.Contains(rule.To, pred)
-}
-
-// allDischarge reports whether every predicate in preds discharges
-// on varName under the current visited set — used for AND-composed
-// From / Given slots on a rule.
-func (a *analyzer) allDischarge(preds []Predicate, varName string, visited map[Predicate]bool) bool {
-	for _, p := range preds {
-		if !a.dischargedRec(p, varName, visited) {
-			return false
-		}
-	}
-	return true
+	return a.dischargedOrViaEvents(alts, varName)
 }
 
 // allRules returns the union of the current package's inference
@@ -1449,12 +1332,12 @@ func (a *analyzer) applyAssignPostconditions(s *ast.AssignStmt) {
 			leaves, ors := returnFacts(sum)
 			if len(leaves) > 0 || len(ors) > 0 {
 				for _, lhs := range s.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+					if k, ok := exprKey(lhs, a.imp); ok {
 						for _, p := range leaves {
-							a.facts.Add(Fact{Pred: p, Var: id.Name})
+							a.rec.sourceLeaf(lhs.Pos(), p, k)
 						}
 						for _, alts := range ors {
-							a.facts.AddOr(alts, id.Name)
+							a.rec.sourceOr(lhs.Pos(), alts, k)
 						}
 					}
 				}
@@ -1465,8 +1348,8 @@ func (a *analyzer) applyAssignPostconditions(s *ast.AssignStmt) {
 	if a.isProveCall(call, "Must") {
 		preds := a.proveCallPredicates(call, "Must")
 		for _, lhs := range s.Lhs {
-			if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
-				a.plantTrailingFacts(preds, id.Name)
+			if k, ok := exprKey(lhs, a.imp); ok {
+				a.plantTrailingFacts(preds, k, lhs.Pos())
 			}
 		}
 	}
@@ -1479,8 +1362,8 @@ func (a *analyzer) applyAssignPostconditions(s *ast.AssignStmt) {
 	if a.isTrustCall(call, "That") {
 		preds := a.trustCallPredicates(call)
 		for _, lhs := range s.Lhs {
-			if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
-				a.plantTrailingFacts(preds, id.Name)
+			if k, ok := exprKey(lhs, a.imp); ok {
+				a.plantTrailingFacts(preds, k, lhs.Pos())
 			}
 		}
 	}
@@ -1512,10 +1395,10 @@ func (a *analyzer) applyDeclPostconditions(vs *ast.ValueSpec) {
 				for _, name := range vs.Names {
 					if name.Name != "_" {
 						for _, p := range leaves {
-							a.facts.Add(Fact{Pred: p, Var: name.Name})
+							a.rec.sourceLeaf(name.Pos(), p, name.Name)
 						}
 						for _, alts := range ors {
-							a.facts.AddOr(alts, name.Name)
+							a.rec.sourceOr(name.Pos(), alts, name.Name)
 						}
 					}
 				}
@@ -1526,7 +1409,7 @@ func (a *analyzer) applyDeclPostconditions(vs *ast.ValueSpec) {
 		preds := a.proveCallPredicates(call, "Must")
 		for _, name := range vs.Names {
 			if name.Name != "_" {
-				a.plantTrailingFacts(preds, name.Name)
+				a.plantTrailingFacts(preds, name.Name, name.Pos())
 			}
 		}
 	}
@@ -1534,7 +1417,7 @@ func (a *analyzer) applyDeclPostconditions(vs *ast.ValueSpec) {
 		preds := a.trustCallPredicates(call)
 		for _, name := range vs.Names {
 			if name.Name != "_" {
-				a.plantTrailingFacts(preds, name.Name)
+				a.plantTrailingFacts(preds, name.Name, name.Pos())
 			}
 		}
 	}
@@ -1577,7 +1460,6 @@ func (a *analyzer) tryProvePattern(assignStmt, guardStmt ast.Stmt) bool {
 	// longer handles prove.That.
 	a.analyzeStmt(assignStmt)
 
-	saved := a.facts.Clone()
 	guardFacts := newFactSet()
 	collectGuardFacts(ifStmt.Cond, a.imp, a.summary.ImportPath, false, guardFacts)
 	negFacts := newFactSet()
@@ -1588,21 +1470,22 @@ func (a *analyzer) tryProvePattern(assignStmt, guardStmt ast.Stmt) bool {
 	elseHasProve := cond == errCondNotNil
 
 	// then-branch
-	a.facts = unionFacts(saved, guardFacts)
+	thenScope := a.rec.enterScope()
+	a.emitFactSetAsSources(guardFacts, ifStmt.Cond.Pos())
 	if thenHasProve {
-		for _, f := range pa.facts {
-			a.facts.Add(f)
-		}
+		a.emitProveAssignAsSources(pa, ifStmt.Cond.Pos())
 	}
 	a.analyzeBlock(ifStmt.Body)
+	a.rec.leaveScope(thenScope)
 	thenEscapes := blockAlwaysEscapes(ifStmt.Body)
 
 	// else-branch (if any)
 	elseEscapes := false
 	if ifStmt.Else != nil {
-		a.facts = unionFacts(saved, negFacts)
+		elseScope := a.rec.enterScope()
+		a.emitFactSetAsSources(negFacts, ifStmt.Cond.Pos())
 		if elseHasProve {
-			pa.plant(a.facts)
+			a.emitProveAssignAsSources(pa, ifStmt.Cond.Pos())
 		}
 		switch e := ifStmt.Else.(type) {
 		case *ast.BlockStmt:
@@ -1611,30 +1494,41 @@ func (a *analyzer) tryProvePattern(assignStmt, guardStmt ast.Stmt) bool {
 		case *ast.IfStmt:
 			a.analyzeIf(e)
 		}
+		a.rec.leaveScope(elseScope)
 	}
 
-	// After-if fact set:
-	//   - if the then-branch always escapes, the continuation
-	//     corresponds to the else-side, so elseHasProve decides.
-	//   - if the else-branch always escapes, the continuation
-	//     is the then-side, so thenHasProve decides.
-	//   - otherwise the control-flow merge is conservative and
-	//     prove facts are dropped.
+	// Post-if join: when exactly one branch always escapes, the
+	// surviving branch's guard-facts (plus the prove-facts if that
+	// side had them) persist into the enclosing scope as if the
+	// escaping branch had never been taken.
+	postPos := ifStmt.End()
 	switch {
 	case thenEscapes && !elseEscapes:
-		a.facts = unionFacts(saved, negFacts)
+		a.emitFactSetAsSources(negFacts, postPos)
 		if elseHasProve {
-			pa.plant(a.facts)
+			a.emitProveAssignAsSources(pa, postPos)
 		}
 	case !thenEscapes && elseEscapes:
-		a.facts = unionFacts(saved, guardFacts)
+		a.emitFactSetAsSources(guardFacts, postPos)
 		if thenHasProve {
-			pa.plant(a.facts)
+			a.emitProveAssignAsSources(pa, postPos)
 		}
-	default:
-		a.facts = saved
 	}
 	return true
+}
+
+// emitProveAssignAsSources mirrors the leaves / Or-facts carried by
+// pa as source events at pos in the current scope. Called at every
+// site where tryProvePattern's FactSet-based path plants pa's facts,
+// so the event stream picks up the successful-prove postconditions
+// at the same control-flow positions.
+func (a *analyzer) emitProveAssignAsSources(pa *proveAssign, pos token.Pos) {
+	for _, f := range pa.facts {
+		a.rec.sourceLeaf(pos, f.Pred, f.Var)
+	}
+	for _, alts := range pa.ors {
+		a.rec.sourceOr(pos, alts, pa.valueVar)
+	}
 }
 
 // proveAssign captures the essentials of a recognized
@@ -1646,18 +1540,6 @@ type proveAssign struct {
 	valueVar string
 	facts    []Fact
 	ors      [][]Predicate
-}
-
-// plant adds every leaf fact and disjunctive fact carried by pa to
-// fs; used at the err == nil branch of a recognized prove.That +
-// err-check pairing.
-func (pa *proveAssign) plant(fs *FactSet) {
-	for _, f := range pa.facts {
-		fs.Add(f)
-	}
-	for _, alts := range pa.ors {
-		fs.AddOr(alts, pa.valueVar)
-	}
 }
 
 // detectProveAssign recognizes an assignment statement that binds
@@ -1825,15 +1707,6 @@ func (a *analyzer) resolveTrailingPredicates(call *ast.CallExpr, role string) Tr
 		out.Ors = append(out.Ors, ors...)
 	}
 	return out
-}
-
-// identName returns the name of an identifier expression and
-// whether the expression was a direct identifier.
-func identName(e ast.Expr) (string, bool) {
-	if id, ok := e.(*ast.Ident); ok {
-		return id.Name, true
-	}
-	return "", false
 }
 
 // aliasFor returns the import alias under which importPath is
