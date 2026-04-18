@@ -75,6 +75,8 @@ Signatures stay plain Go. Predicates are ordinary `func(T) bool`. No wrapper typ
 
 Declare once what must hold. Nobody forgets — the requirement is right there. Nobody re-validates defensively — once a precondition is proven at a call site, the check erases to nothing. A predicate written once is enforced everywhere the function is called, for as long as it stays declared.
 
+Predicates are also generic. `func nonNil[T any](p *T) bool` declared once gives you **statically-checked nil safety** across every pointer in the codebase — every `proven.That(p, nonNil)` enforces it, every unguarded call fails the build.
+
 ## Quick start
 
 ```bash
@@ -89,6 +91,38 @@ GOFLAGS="-toolexec=proven" go build ./...
 ```
 
 See [Setup](#setup--ide-and-cache-configuration) below for the split-cache setup that keeps toolexec and non-toolexec builds from contaminating each other. Full documentation: **[gigurra.github.io/proven](https://gigurra.github.io/proven/)**.
+
+<details>
+<summary><strong>Nil safety</strong> — one predicate, every pointer type</summary>
+
+Predicates can be generic. Declare `nonNil` once and the Go compiler's type inference instantiates it at every call site for whatever pointer type is in scope. The preprocessor treats the bare identifier as one predicate across all instantiations, so every `proven.That(p, nonNil)` and `if nonNil(p) { ... }` interoperates.
+
+```go
+func nonNil[T any](p *T) bool { return p != nil }
+
+func greet(u *User) {
+    proven.That(u, nonNil)
+    _ = u.Name // safe — greet declared its input is non-nil
+}
+
+func handler(id int) {
+    u, err := prove.That(lookupUser(id), nonNil) // runtime nil-check at the boundary
+    if err != nil {
+        return
+    }
+    greet(u) // nonNil is proven; compiler accepts the call
+}
+```
+
+A caller that forgets the guard fails the build:
+
+```
+main.go:NN:CC: proven: cannot prove nonNil on parameter 0 of greet
+```
+
+No generics ceremony at the call site, no separate `NonNil[*User]` or `*NonNilUser` types — just one predicate, enforced everywhere a pointer flows.
+
+</details>
 
 <details>
 <summary><strong>Multiple predicates and combinators</strong></summary>

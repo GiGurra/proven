@@ -72,6 +72,29 @@ A `proven.That(x, isPositive)` at the top of a function body does two jobs at on
 
 Proven shifts that burden onto the compiler. A function declares once what must hold; the preprocessor proves it at every call site. If the proof succeeds, nothing runs at runtime. If any path can't be proved, the build fails with a diagnostic pointing at the offending call site.
 
+### Nil safety
+
+Predicates are generic. `func nonNil[T any](p *T) bool` declared once gives statically-checked nil safety across every pointer in the codebase:
+
+```go
+func nonNil[T any](p *T) bool { return p != nil }
+
+func greet(u *User) {
+    proven.That(u, nonNil)
+    _ = u.Name // safe — greet's input is non-nil by contract
+}
+
+func handler(id int) {
+    u, err := prove.That(lookupUser(id), nonNil) // runtime nil-check at the boundary
+    if err != nil {
+        return
+    }
+    greet(u) // nonNil is proven; compiler accepts the call
+}
+```
+
+Every `proven.That(p, nonNil)` is enforced; every unguarded call of a function that requires `nonNil` fails the build with a clear diagnostic. No separate `NonNil[*User]` type, no wrapper-based newtype dance — just one predicate, inferred by the Go compiler at every call site.
+
 ## How it compares
 
 Compile-time contracts aren't new — Eiffel's Design by Contract, Ada `Pre`/`Post`, C++ concepts, Rust's type-state patterns are all takes on the same idea. Their shared failure mode is that a requirement verified only at compile time is fragile: nothing catches you accidentally removing it, weakening it, or forgetting to state it.
