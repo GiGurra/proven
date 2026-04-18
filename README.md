@@ -1,29 +1,31 @@
 # proven
 
-Compile-time contracts for Go, enforced via a `-toolexec` preprocessor. Declare what every call site must prove; the build fails loudly when it can't.
+Compile-time contracts for Go, enforced via a `-toolexec` preprocessor.
 
-## What is this?
+Validation in Go is discipline, not guarantee. Data flows through dozens of functions; invariants get validated at the edge (sometimes), re-validated defensively (sometimes), or silently assumed (usually). `proven` makes the assumptions explicit and has the compiler verify them: a function declares what must hold about its inputs, and every caller has to prove it at build time. If they can't, the build fails with a diagnostic pointing at the call site. If they can, nothing runs at runtime.
 
-Declare a function's preconditions inside its body using `proven.That`:
+Declare preconditions and postconditions inside function bodies using plain `func(T) bool` predicates:
 
 ```go
+func isPositive(x int) bool    { return x > 0 }
+func isNonEmpty(s string) bool { return len(s) > 0 }
+func maxLen280(s string) bool  { return len(s) <= 280 }
+
 func Transfer(amount int, note string) error {
     proven.That(amount, isPositive)
     proven.That(note, isNonEmpty, maxLen280)
     // ... body ...
     return nil
 }
+
+func FindUserID() int {
+    return proven.Returns(42, isPositive)
+}
 ```
 
-The function signature stays pure Go — no wrapper types, no type parameters, no struct decorations. `gopls` and every editor see ordinary Go.
+Signatures stay plain Go — no wrappers, no generics ceremony, no struct decorations. Multiple predicates in a `That` / `Returns` call are AND-composed; for OR composition or first-class predicate values use `proven.All`, `proven.Any`, `proven.Not`.
 
-**IDE experience is always green.** `gopls`, `go vet`, and every Go-aware editor see ordinary Go — no red squiggles, no special configuration, no build tags.
-
-**Link fails without the preprocessor.** `proven.That` and `proven.Returns` wrap their checks in an `atCompileTime` helper declared via `//go:linkname` to an external symbol the preprocessor supplies. Any `go build` / `go test` of a main or test target refuses to link without the preprocessor, with a clear error: `relocation target _proven_atCompileTime not defined`. You cannot silently ship code that bypasses proven.
-
-**Under the preprocessor**, call sites are discharged by flow-sensitive analysis (literals, preceding checks, early-return guards, postconditions on return values). Discharged calls are erased; undischarged calls fail the build with a diagnostic.
-
-**Wiring verification in tests.** The sibling package `pkg/proventest` supplies the link symbol for test binaries and exposes `proventest.AssertFails(t, pred, fn)` — it runs `fn` with proven checks temporarily executing at runtime and asserts that `pred` (and no other predicate) is the one that fires:
+Verify that a precondition is wired correctly in a test:
 
 ```go
 proventest.AssertFails(t, isPositive, func() {
@@ -31,13 +33,17 @@ proventest.AssertFails(t, isPositive, func() {
 })
 ```
 
-Catches the case where a precondition silently stops applying to its intended parameter.
+## How it works
 
-The goal: **stop forgetting to validate incoming data**, and stop repeating the same validation at every layer once you have.
+**Preprocessor over `-toolexec`.** For each call to a function with `proven.That` / `proven.Returns` annotations, the preprocessor runs flow-sensitive analysis in the caller: facts from literals, preceding checks, early-return guards, and prior `proven.Returns` postconditions are collected; each predicate must be discharged. Proven obligations are erased from the compiled binary. Unproven ones fail the build.
+
+**IDE-friendly link-time gate.** `proven.That` and `proven.Returns` wrap their check blocks in a package-private `atCompileTime` helper declared via `//go:linkname` to an external symbol (`_proven_atCompileTime`) with no Go body. `gopls`, `go vet`, and every editor see plain Go — type-checking is always green. But `go build` / `go test` on a `main` or test target refuses to link without the preprocessor, producing `relocation target _proven_atCompileTime not defined`. You cannot silently ship code that bypasses proven.
+
+**Test-time verification.** `pkg/proventest` supplies the linker symbol for test binaries. By default it's a no-op (matches production). Inside `proventest.WithChecks(fn)` — or the higher-level `AssertFails(t, pred, fn)` — each `atCompileTime` block executes at runtime and a failing predicate panics with a structured `proven.Violation` naming the predicate that fired. Tests use this to assert "this parameter is constrained by this predicate", catching drift between assertion and implementation.
 
 ## Status
 
-Pre-alpha. The runtime-stubs API is in place (`pkg/proven`). The preprocessor itself is not yet built.
+Pre-alpha. The runtime-stub API is in place (`pkg/proven`, `pkg/proventest`); the preprocessor itself is not yet built.
 
 See [`docs/design.md`](docs/design.md) for the authoritative design, and [`docs/companion-packages.md`](docs/companion-packages.md) for the planned `prove` (runtime boundary validation) and `infer` (compile-time evaluation) siblings.
 
