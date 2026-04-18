@@ -84,6 +84,19 @@ type FuncSummary struct {
 	ParamOrs    map[int][][]Predicate
 	ReturnPreds []Predicate
 	ReturnOrs   [][]Predicate
+
+	// DerivedReturnPreds / DerivedReturnOrs are postconditions the
+	// analyzer inferred from the body — the intersection of fact sets
+	// on the returned identifier across every ReturnStmt. Populated
+	// after the flow-sensitive pass (AnalyzeFunc). Callers plant them
+	// as facts at assignment sites the same way as the explicit
+	// ReturnPreds / ReturnOrs above, so a function without an
+	// explicit proven.Returns can still advertise the facts its body
+	// actually proves. Keeping the explicit fields distinct preserves
+	// the "this is the declared contract" marker for API-boundary
+	// functions that opt into a claim the compiler verifies.
+	DerivedReturnPreds []Predicate
+	DerivedReturnOrs   [][]Predicate
 }
 
 // Key returns a stable identifier for looking up the summary from

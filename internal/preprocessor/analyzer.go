@@ -75,13 +75,13 @@ type Fact struct {
 // leaf fact or matches a disjunctive fact's key structurally.
 type FactSet struct {
 	m   map[Fact]struct{}
-	ors map[string]map[string]struct{}
+	ors map[string]map[string][]Predicate
 }
 
 func newFactSet() *FactSet {
 	return &FactSet{
 		m:   make(map[Fact]struct{}),
-		ors: make(map[string]map[string]struct{}),
+		ors: make(map[string]map[string][]Predicate),
 	}
 }
 
@@ -93,7 +93,8 @@ func (fs *FactSet) Has(pred Predicate, v string) bool {
 
 // AddOr records a disjunctive fact `alts-OR` on variable v. Alt
 // order is normalized so Or(a, b) and Or(b, a) collide on the same
-// key.
+// key; the alts slice is stored verbatim so return-fact snapshots
+// can recover the original alt list for intersection.
 func (fs *FactSet) AddOr(alts []Predicate, v string) {
 	if v == "" || len(alts) == 0 {
 		return
@@ -101,10 +102,12 @@ func (fs *FactSet) AddOr(alts []Predicate, v string) {
 	key := orKey(alts)
 	m := fs.ors[v]
 	if m == nil {
-		m = make(map[string]struct{})
+		m = make(map[string][]Predicate)
 		fs.ors[v] = m
 	}
-	m[key] = struct{}{}
+	if _, exists := m[key]; !exists {
+		m[key] = append([]Predicate(nil), alts...)
+	}
 }
 
 // HasOr reports whether an exact-match disjunctive fact is recorded
@@ -127,9 +130,9 @@ func (fs *FactSet) Clone() *FactSet {
 		out.m[f] = struct{}{}
 	}
 	for v, m := range fs.ors {
-		dup := make(map[string]struct{}, len(m))
-		for k := range m {
-			dup[k] = struct{}{}
+		dup := make(map[string][]Predicate, len(m))
+		for k, alts := range m {
+			dup[k] = alts
 		}
 		out.ors[v] = dup
 	}
@@ -208,8 +211,24 @@ type ParamDischarge struct {
 // func or pkg.Name selector. Pass nil for either to disable strict
 // mode (used by tests that do not surface diagnostics).
 func AnalyzeFunc(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo, imports map[string]*PackageSummary, fset *token.FileSet, diags *[]Diagnostic) []CallDischarge {
+	calls, _, _ := AnalyzeFuncWithReturns(caller, summary, imp, imports, fset, diags)
+	return calls
+}
+
+// AnalyzeFuncWithReturns is the richer variant of AnalyzeFunc: in
+// addition to the call-discharge list, it returns the derived
+// postconditions — the intersection of leaf / Or facts on the
+// returned identifier across every ReturnStmt. An empty slice is
+// returned when the function has no return statements, returns a
+// non-identifier result, or carries no facts at exit.
+//
+// The analyzer runs the same flow-sensitive walk either way; the
+// return-snapshot bookkeeping is linear in the number of returns
+// and does not add an asymptotic cost. Functions whose bodies
+// establish no facts produce empty snapshots cheaply.
+func AnalyzeFuncWithReturns(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo, imports map[string]*PackageSummary, fset *token.FileSet, diags *[]Diagnostic) ([]CallDischarge, []Predicate, [][]Predicate) {
 	if caller.Body == nil {
-		return nil
+		return nil, nil, nil
 	}
 	a := &analyzer{
 		summary:     summary,
@@ -223,7 +242,8 @@ func AnalyzeFunc(caller *ast.FuncDecl, summary *PackageSummary, imp *importInfo,
 		diags:       diags,
 	}
 	a.analyzeBlock(caller.Body)
-	return a.out
+	leaves, ors := a.intersectReturns()
+	return a.out, leaves, ors
 }
 
 // seedFactsFromPreconditions returns the initial FactSet for
@@ -331,6 +351,23 @@ type analyzer struct {
 	provenAlias string
 	fset        *token.FileSet
 	diags       *[]Diagnostic
+
+	// returnSnapshots collects one entry per ReturnStmt whose result
+	// is a plain identifier, snapshotting the leaf / Or facts on that
+	// identifier at the return point. Returns whose result is not an
+	// identifier (literals, expressions, multi-value returns we do
+	// not decompose) land as empty snapshots — they contribute no
+	// predicates, which intersect-with-empty correctly collapses the
+	// whole function's inferred postcondition to nothing. Unsound
+	// otherwise: a function that sometimes returns a literal cannot
+	// advertise facts that only hold on the non-literal branch.
+	returnSnapshots []returnSnapshot
+	sawReturn       bool
+}
+
+type returnSnapshot struct {
+	leaves []Predicate
+	ors    [][]Predicate
 }
 
 // analyzeBlock walks the statements of block in order under the
@@ -394,6 +431,7 @@ func (a *analyzer) analyzeStmt(stmt ast.Stmt) {
 		for _, r := range s.Results {
 			a.walkCalls(r)
 		}
+		a.snapshotReturn(s)
 	case *ast.BlockStmt:
 		saved := a.facts.Clone()
 		a.analyzeBlock(s)
@@ -906,6 +944,136 @@ func (a *analyzer) discharged(pred Predicate, varName string) bool {
 	return a.dischargedRec(pred, varName, make(map[Predicate]bool))
 }
 
+// snapshotReturn records the fact set on a return's first result.
+//
+// If the result is an identifier, collect every leaf fact on that
+// identifier plus every Or-fact on it. Otherwise (literal, multi-
+// value return, expression) record an empty snapshot — the sound
+// intersection rule will collapse the function's derived
+// postconditions to nothing across a function that sometimes
+// returns a literal. A return with no results (e.g. a bare `return`
+// in a void function, or named-return shortcuts) contributes an
+// empty snapshot too.
+func (a *analyzer) snapshotReturn(s *ast.ReturnStmt) {
+	a.sawReturn = true
+	if len(s.Results) == 0 {
+		a.returnSnapshots = append(a.returnSnapshots, returnSnapshot{})
+		return
+	}
+	id, ok := s.Results[0].(*ast.Ident)
+	if !ok {
+		a.returnSnapshots = append(a.returnSnapshots, returnSnapshot{})
+		return
+	}
+	snap := returnSnapshot{}
+	for f := range a.facts.m {
+		if f.Var == id.Name {
+			snap.leaves = append(snap.leaves, f.Pred)
+		}
+	}
+	if altMap, ok := a.facts.ors[id.Name]; ok {
+		for _, alts := range altMap {
+			snap.ors = append(snap.ors, append([]Predicate(nil), alts...))
+		}
+	}
+	a.returnSnapshots = append(a.returnSnapshots, snap)
+}
+
+// intersectReturns returns the leaf-predicate and Or-alt
+// intersections across every recorded return snapshot. A function
+// with no return statements at all (infinite-loop / os.Exit-only
+// body) has sawReturn == false and returns (nil, nil) — callers
+// should not advertise anything.
+func (a *analyzer) intersectReturns() ([]Predicate, [][]Predicate) {
+	if !a.sawReturn || len(a.returnSnapshots) == 0 {
+		return nil, nil
+	}
+	// Leaf intersection via count.
+	counts := make(map[Predicate]int)
+	for _, snap := range a.returnSnapshots {
+		seen := make(map[Predicate]struct{}, len(snap.leaves))
+		for _, p := range snap.leaves {
+			if _, dup := seen[p]; dup {
+				continue
+			}
+			seen[p] = struct{}{}
+			counts[p]++
+		}
+	}
+	var leaves []Predicate
+	target := len(a.returnSnapshots)
+	for p, c := range counts {
+		if c == target {
+			leaves = append(leaves, p)
+		}
+	}
+	// Or-alt intersection via canonical-key count. Preserve the
+	// first-seen alt ordering for readability in diagnostics.
+	orCounts := make(map[string]int)
+	orAlts := make(map[string][]Predicate)
+	for _, snap := range a.returnSnapshots {
+		seen := make(map[string]struct{}, len(snap.ors))
+		for _, alts := range snap.ors {
+			k := orKey(alts)
+			if _, dup := seen[k]; dup {
+				continue
+			}
+			seen[k] = struct{}{}
+			orCounts[k]++
+			if _, recorded := orAlts[k]; !recorded {
+				orAlts[k] = append([]Predicate(nil), alts...)
+			}
+		}
+	}
+	var ors [][]Predicate
+	for k, c := range orCounts {
+		if c == target {
+			ors = append(ors, orAlts[k])
+		}
+	}
+	return leaves, ors
+}
+
+// returnFacts reports the postconditions a callee advertises to its
+// callers — the union of the explicit proven.Returns / trust.Returns
+// lists (ReturnPreds / ReturnOrs) and the analyzer-derived intersection
+// of fact sets at each ReturnStmt (DerivedReturnPreds /
+// DerivedReturnOrs). Explicit claims are enforced by the strict-mode
+// verifyProvenReturns pass; derived claims are sound by construction
+// — only facts the analyzer itself established on the returned
+// identifier at every return.
+func returnFacts(sum *FuncSummary) ([]Predicate, [][]Predicate) {
+	if len(sum.DerivedReturnPreds) == 0 && len(sum.DerivedReturnOrs) == 0 {
+		return sum.ReturnPreds, sum.ReturnOrs
+	}
+	leaves := append([]Predicate(nil), sum.ReturnPreds...)
+	seen := make(map[Predicate]struct{}, len(leaves))
+	for _, p := range leaves {
+		seen[p] = struct{}{}
+	}
+	for _, p := range sum.DerivedReturnPreds {
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		leaves = append(leaves, p)
+	}
+	ors := append([][]Predicate(nil), sum.ReturnOrs...)
+	seenOrs := make(map[string]struct{}, len(ors))
+	for _, alts := range ors {
+		seenOrs[orKey(alts)] = struct{}{}
+	}
+	for _, alts := range sum.DerivedReturnOrs {
+		k := orKey(alts)
+		if _, dup := seenOrs[k]; dup {
+			continue
+		}
+		seenOrs[k] = struct{}{}
+		ors = append(ors, alts)
+	}
+	return leaves, ors
+}
+
 // plantTrailingFacts adds every leaf and disjunctive fact carried
 // by tp as a fact on variable v. Shared between the prove.Must /
 // trust.That assignment sites so the Or-handling stays in one place.
@@ -1035,16 +1203,19 @@ func (a *analyzer) applyAssignPostconditions(s *ast.AssignStmt) {
 	if !ok {
 		return
 	}
-	// proven.Returns-annotated callee.
+	// proven.Returns-annotated callee or analyzer-derived postconds.
 	if calleePkg, key, ok := a.resolveCallee(call); ok {
-		if sum, ok := a.lookupCalleeSummary(calleePkg, key); ok && (len(sum.ReturnPreds) > 0 || len(sum.ReturnOrs) > 0) {
-			for _, lhs := range s.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
-					for _, p := range sum.ReturnPreds {
-						a.facts.Add(Fact{Pred: p, Var: id.Name})
-					}
-					for _, alts := range sum.ReturnOrs {
-						a.facts.AddOr(alts, id.Name)
+		if sum, ok := a.lookupCalleeSummary(calleePkg, key); ok {
+			leaves, ors := returnFacts(sum)
+			if len(leaves) > 0 || len(ors) > 0 {
+				for _, lhs := range s.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+						for _, p := range leaves {
+							a.facts.Add(Fact{Pred: p, Var: id.Name})
+						}
+						for _, alts := range ors {
+							a.facts.AddOr(alts, id.Name)
+						}
 					}
 				}
 			}
@@ -1095,14 +1266,17 @@ func (a *analyzer) applyDeclPostconditions(vs *ast.ValueSpec) {
 		return
 	}
 	if calleePkg, key, ok := a.resolveCallee(call); ok {
-		if sum, ok := a.lookupCalleeSummary(calleePkg, key); ok && (len(sum.ReturnPreds) > 0 || len(sum.ReturnOrs) > 0) {
-			for _, name := range vs.Names {
-				if name.Name != "_" {
-					for _, p := range sum.ReturnPreds {
-						a.facts.Add(Fact{Pred: p, Var: name.Name})
-					}
-					for _, alts := range sum.ReturnOrs {
-						a.facts.AddOr(alts, name.Name)
+		if sum, ok := a.lookupCalleeSummary(calleePkg, key); ok {
+			leaves, ors := returnFacts(sum)
+			if len(leaves) > 0 || len(ors) > 0 {
+				for _, name := range vs.Names {
+					if name.Name != "_" {
+						for _, p := range leaves {
+							a.facts.Add(Fact{Pred: p, Var: name.Name})
+						}
+						for _, alts := range ors {
+							a.facts.AddOr(alts, name.Name)
+						}
 					}
 				}
 			}

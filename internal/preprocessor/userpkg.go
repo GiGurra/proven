@@ -225,12 +225,56 @@ func analyzePackageFiles(sum *PackageSummary, files []*ast.File, imports map[str
 	for _, f := range files {
 		imp := collectImports(f)
 		for _, decl := range f.Decls {
-			if fn, ok := decl.(*ast.FuncDecl); ok {
-				all = append(all, AnalyzeFunc(fn, sum, imp, imports, fset, diags)...)
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
 			}
+			calls, derivedLeaves, derivedOrs := AnalyzeFuncWithReturns(fn, sum, imp, imports, fset, diags)
+			all = append(all, calls...)
+			recordDerivedReturns(sum, fn, derivedLeaves, derivedOrs)
 		}
 	}
 	return all
+}
+
+// recordDerivedReturns stores the analyzer-inferred postconditions on
+// the function's summary entry so cross-package sidecar readers and
+// same-package downstream fact-plant sites pick them up without the
+// function needing an explicit proven.Returns. Unchanged when the
+// analyzer produced no facts, so functions whose bodies establish
+// nothing add no load to the sidecar.
+//
+// A summary entry is created on demand if none exists yet — normal
+// scan output skips un-annotated functions. The entry's ParamPreds is
+// initialized to a non-nil map so later scanner-visible fields do not
+// see a sparse value.
+func recordDerivedReturns(sum *PackageSummary, fn *ast.FuncDecl, leaves []Predicate, ors [][]Predicate) {
+	if len(leaves) == 0 && len(ors) == 0 {
+		return
+	}
+	if sum.Funcs == nil {
+		sum.Funcs = make(map[string]*FuncSummary)
+	}
+	name := fn.Name.Name
+	recv := ""
+	if fn.Recv != nil && len(fn.Recv.List) > 0 {
+		recv = receiverTypeName(fn.Recv.List[0].Type)
+	}
+	key := name
+	if recv != "" {
+		key = recv + "." + name
+	}
+	entry, ok := sum.Funcs[key]
+	if !ok {
+		entry = &FuncSummary{
+			Name:       name,
+			Recv:       recv,
+			ParamPreds: make(map[int][]Predicate),
+		}
+		sum.Funcs[key] = entry
+	}
+	entry.DerivedReturnPreds = leaves
+	entry.DerivedReturnOrs = ors
 }
 
 // rewritePlan walks each source file, rewrites any proven.That /
