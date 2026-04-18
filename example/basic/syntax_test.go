@@ -98,8 +98,11 @@ func TestWiring_ReturnsPostconditionIsPositive(t *testing.T) {
 }
 
 // 9. Valid inputs do NOT panic even with checks enabled.
+// AssertPasses is the positive-compliance counterpart to AssertFails:
+// the test passes iff every declared precondition and postcondition
+// along the call chain holds for the supplied inputs.
 func TestWiring_ValidInputsPassUnderWithChecks(t *testing.T) {
-	proventest.WithChecks(func() {
+	proventest.AssertPasses(t, func() {
 		if err := Transfer(100, "hello", "USD"); err != nil {
 			t.Fatal(err)
 		}

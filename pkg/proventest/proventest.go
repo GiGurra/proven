@@ -80,6 +80,49 @@ func AssertAnyFailure(t *testing.T, fn func()) proven.Violation {
 	return capture(t, fn)
 }
 
+// AssertPasses asserts that running fn under WithChecks produces no
+// proven violation — every declared precondition and postcondition
+// along the call chain holds for the inputs fn supplies. The symmetric
+// counterpart to AssertFails: use it to pin down "this input is valid,
+// and the function's declared contracts accept it".
+//
+// If a violation fires, the test fails with a message naming the
+// offending predicate and the value it rejected. Non-proven panics
+// are re-raised (they are not this helper's to eat).
+//
+// Usage:
+//
+//	proventest.AssertPasses(t, func() {
+//	    Transfer(5, "hi") // known-good input; no violation should fire
+//	})
+func AssertPasses(t *testing.T, fn func()) {
+	t.Helper()
+	var violation proven.Violation
+	var raised bool
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil {
+				return
+			}
+			if v, ok := r.(proven.Violation); ok {
+				violation = v
+				raised = true
+				return
+			}
+			// Non-proven panic — not ours to eat.
+			panic(r)
+		}()
+		WithChecks(fn)
+	}()
+	if raised {
+		t.Fatalf("expected no violation, but %s fired on value=%v",
+			proven.PredicateName(violation.Predicate),
+			violation.Value,
+		)
+	}
+}
+
 // capture runs fn under WithChecks and returns the proven.Violation
 // raised by the first failing predicate. Fails the test if no panic
 // occurred, or if the panic was not a proven.Violation (re-raised).
