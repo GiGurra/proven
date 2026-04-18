@@ -16,7 +16,7 @@ func Transfer(amount int, note string) error {
 
 Under the preprocessor: each caller must discharge these via flow analysis; calls that succeed erase the `That` to zero runtime cost; calls that fail break the build. Without the preprocessor: the `That` call runs as a plain runtime contract check.
 
-**Use for:** internal APIs where callers are expected to have already proven their inputs. Proofs flow through call chains: a value returned via `proven.Returns` carries its postcondition into the next call.
+**Use for:** internal APIs where callers are expected to have already proven their inputs. Proofs flow through call chains: a value returned via `proven.Returns` carries its postcondition into the next call — and the preprocessor also **auto-infers** postconditions for functions that don't use `proven.Returns`, by snapshotting the facts on the returned identifier at each `return` and advertising their intersection to callers. Use explicit `proven.Returns` when you want the contract to be a declared, compiler-verified claim (API boundary, design anchor); skip it for internal helpers where the body already proves what callers need.
 
 See [`design.md`](design.md) for the full specification.
 

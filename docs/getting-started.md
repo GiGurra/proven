@@ -98,7 +98,7 @@ Same `file:line:col:` format Go's own compiler uses, so your editor click-throug
 
 - Add an explicit guard: `if isPositive(x) { fmt.Println(double(x)) }`
 - Normalize the value at a boundary: `v, err := prove.That(x, isPositive); if err != nil { ... }; fmt.Println(double(v))`
-- Have the producer declare a postcondition: change `readFromSomewhere` to `return proven.Returns(5, isPositive)`.
+- Have the producer advertise the fact — and in most cases no `proven.Returns` is needed. If `readFromSomewhere`'s body establishes `isPositive` on its returned identifier (via a guard, a `prove.Must`, or a declared precondition), the preprocessor **auto-infers** that postcondition and every caller picks it up. Use explicit `proven.Returns(v, isPositive)` when you want the contract to be a compiler-verified claim at the declaration site (API boundary).
 - Take responsibility: `v := trust.That(x, isPositive); fmt.Println(double(v))` — if `x` was validated by a mechanism the analyzer cannot see.
 
 Each produces the same fact; the preprocessor accepts the build after any of them.

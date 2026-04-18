@@ -16,12 +16,23 @@ func Transfer(amount int, note string) error {
     // ... body ...
 }
 
-// Declare a postcondition on a return value. The value must already carry
-// the predicate as a fact at the Returns site — here the function's own
-// declared precondition does that work:
+// No proven.Returns needed in the common case. The preprocessor snapshots
+// the facts that hold on the returned identifier and advertises their
+// intersection to every caller automatically:
 func Normalize(x int) int {
     proven.That(x, isPositive)
-    return proven.Returns(x, isPositive)
+    return x // callers see isPositive as a fact on the result, no explicit Returns
+}
+
+// Nested calls work the same way — target's precondition discharges because
+// Normalize's inferred postcondition flows into the argument position:
+//   target(Normalize(x))  // isPositive carries through
+
+// Use explicit proven.Returns when you want the compiler to verify a
+// specific contract at the declaration site (API boundary, design anchor):
+func Clamp(x int) int {
+    proven.That(x, isPositive)
+    return proven.Returns(x, isPositive) // verified + advertised
 }
 
 // For a literal or computed expression the analyzer can't reason about,
@@ -89,7 +100,31 @@ func ChargeFX(amount int, currency string, userID int) error {
 }
 ```
 
-Callers of a function with `proven.Returns(v, isPositive)` as its return automatically get `isPositive` as a fact on the returned value — no re-check at the call site.
+Callers of a function with `proven.Returns(v, isPositive)` as its return automatically get `isPositive` as a fact on the returned value — no re-check at the call site. The same applies **without** an explicit `Returns`: the preprocessor inspects the returned identifier at each `return` statement, takes the intersection of facts across every return, and advertises that intersection to callers.
+
+</details>
+
+<details>
+<summary><strong>Auto-inferred postconditions — when you don't need <code>proven.Returns</code></strong></summary>
+
+Most functions don't need `proven.Returns` at all. The analyzer walks the body, snapshots the fact set on the returned identifier at every `return`, and publishes the intersection as the function's postcondition — which callers plant on their LHS / nested-argument position and use to discharge downstream obligations.
+
+```go
+func normalize(p int) int {
+    proven.That(p, isPositive)
+    return p // derived postcondition: isPositive on the returned identifier
+}
+
+// Nested call — target's precondition discharges because normalize's
+// inferred postcondition flows into the argument position:
+func caller(x int) {
+    if isPositive(x) {
+        target(normalize(x)) // no intermediate binding needed
+    }
+}
+```
+
+The intersection-across-returns rule is sound by construction: a return that yields a literal (`return 0`) or a computed expression (`return a + b`) contributes no analyzer facts, so a function that sometimes returns a non-identifier advertises nothing and the build fails with a normal undischarged diagnostic. Explicit `proven.Returns` still has its place as a **verified contract anchor** at API boundaries — the compiler checks the claim holds and the site becomes the declared shape of the function's output.
 
 </details>
 
@@ -162,9 +197,12 @@ func F(x int) {
     G(x)                       // G wants isPositive — discharged from seeding
 }
 
-// 5. proven.Returns postcondition.
-v := DefaultUserID() // DefaultUserID advertises isPositive via Returns
+// 5. Callee's advertised postcondition (explicit proven.Returns OR
+//    analyzer-inferred from return-fact snapshots). Works at an
+//    assignment AND inside a nested call argument.
+v := DefaultUserID() // advertises isPositive (explicit or derived)
 Target(v)            // isPositive(v) is a fact
+Target(DefaultUserID()) // same: postcondition flows into the nested arg
 
 // 6. prove.That or prove.Must success.
 v, err := prove.That(raw, isPositive)
