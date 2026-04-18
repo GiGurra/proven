@@ -44,6 +44,18 @@ func Charge(amount int, currency string, userID int) error {
 
 The combinators return plain `func(T) bool`, so they compose freely and can be stored in package-level variables, looked up from maps, passed to `Returns`, or supplied directly to `That`.
 
+When you want a call site that has established one predicate (say `isSmallPositive`) to satisfy a callee that requires a different but related predicate (say `isPositive`) without re-proving, declare the inference rule at package scope:
+
+```go
+// infer: isSmallPositive ⇒ isPositive
+var _ = infer.From(isSmallPositive).To(isPositive)
+
+// infer: isEven ⇒ isPositive, when the value is > 0
+var _ = infer.From(isEven).Given(isGreaterThanZero).To(isPositive)
+```
+
+The preprocessor consumes these at scan time and walks the resulting implication graph when discharging obligations. Rules are trusted — the preprocessor does not symbolically verify them. The declarer is responsible, and a future `infertest.Verify` helper will property-test rules on sample inputs.
+
 Compile-time contracts aren't new — Eiffel's Design by Contract, Ada's `Pre`/`Post` clauses, C++ `static_assert` and concepts, and Rust's type-state patterns are all takes on the same idea. Their shared failure mode is that a requirement verified only at compile time is fragile: nothing catches you accidentally removing it (*"why is this line here?"*), weakening it (someone narrows `isPositive` to `isNonNegative` in a refactor), or forgetting to state it in the first place.
 
 `proven` addresses this by letting you verify at *test* time that the declarations are what you think. The preprocessor erases `proven.That` at build as usual, but inside tests you can opt in to running the blocks at runtime and asserting that the right predicate fires on the right parameter:

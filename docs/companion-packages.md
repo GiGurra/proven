@@ -55,23 +55,45 @@ func handleTransfer(r *http.Request) error {
 
 **Use for:** HTTP handlers, JSON/XML/protobuf decoders, CLI arg parsing, config loaders, database row mapping — any place raw external data enters the program.
 
-## `infer` — compile-time evaluation (`comptime`)
+## `infer` — compile-time deduction
 
-Zig-style `comptime` for the subset of Go that's pure. Evaluate an expression at build time, substitute the resulting literal, and omit the evaluation from the binary.
+Two capabilities, unified under the "compile-time deduction" theme.
+
+### Inference rules — now
+
+Declare that one predicate implies another, optionally under a context. The proven preprocessor consumes these rules at scan time and uses them to discharge obligations without the caller having to re-prove a stronger predicate from scratch:
+
+```go
+// At package scope — picked up by the preprocessor.
+var _ = infer.From(isSmallPositive).To(isPositive)
+var _ = infer.From(isEven).Given(isGreaterThanZero).To(isPositive)
+```
+
+Reads left-to-right as the logical statement: *"from this premise, [given this context,] we conclude this."* Rules are **trusted** — the preprocessor does not symbolically verify that the declared implication actually holds. A future `infertest.Verify` helper would property-test rules on sample inputs to catch declared-but-false rules during development.
+
+Implemented: `pkg/infer/infer.go` (runtime stubs).
+
+### Compile-time evaluation (`comptime`) — future
+
+Zig-style `comptime` for the pure subset of Go. Evaluate an expression at build time, substitute the resulting literal, omit the evaluation from the binary:
 
 ```go
 var primes = infer.Const(sieve(10_000))
 ```
 
-Under the preprocessor: `sieve(10_000)` runs during compilation; the result is emitted as a Go literal baked into the binary. At startup, `primes` is already populated — zero runtime cost.
+Under the preprocessor: `sieve(10_000)` runs during compilation; the result is emitted as a Go literal baked into the binary. Startup cost zero.
 
-Without the preprocessor: `infer.Const` is the identity function; the expression evaluates at package-init time. Functionally identical, just slower.
+Without the preprocessor: `infer.Const` is the identity function; the expression evaluates at package-init time.
 
-Purity is verified by the preprocessor. Impure operations (I/O, unknown functions, non-deterministic stdlib calls) fail the build with a diagnostic pointing at the first impure operation.
+Purity is verified by the preprocessor. Impure operations (I/O, unknown functions) fail the build at the first impure operation.
 
-**Use for:** lookup tables, configuration constants derived by computation, code generation that would otherwise live in `go generate`, any value that could be computed up-front from literals.
+**Use for:** lookup tables, configuration constants derived by computation, code generation that would otherwise live in `go generate`.
 
-(The original `concept.md` placed `Const` under `proven.Const`. That API relocates here; `proven` is reserved for contract-style assertions.)
+(The original `concept.md` placed `Const` under `proven.Const`. It relocates here; `proven` is reserved for contract-style assertions.)
+
+### Why one package
+
+Both features are "what we deduce at build time". Inference rules deduce *relationships between predicates*; `Const` deduces *values of expressions*. They share the same preprocessor pass structure and the same trust-the-declarer convention, so bundling them under `infer` keeps the mental model narrow.
 
 ## Why three packages
 
@@ -87,6 +109,6 @@ The three packages share the preprocessor infrastructure (toolexec entry, per-pa
 |---------|--------|
 | `proven` | Runtime stubs implemented in `pkg/proven/`. Preprocessor is future work. |
 | `prove`  | Not yet implemented. This document captures the intent. |
-| `infer`  | Not yet implemented. This document captures the intent. |
+| `infer`  | Inference rules (`From(p).To(q)` / `From(p).Given(c).To(q)`) implemented as runtime stubs in `pkg/infer/`. Compile-time evaluation (`infer.Const`) still future. Preprocessor consumption pending. |
 
 When the preprocessor lands, the three packages become siblings under `pkg/`, each with their runtime stubs plus the shared preprocessor pass-hooks.
