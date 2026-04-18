@@ -36,7 +36,7 @@ Tests can opt into running the block at runtime for wiring verification. `proven
 
 ## Package layout
 
-- `pkg/proven/` — the public API: `That`, `Returns`, `All`, `Any`, `Not`.
+- `pkg/proven/` — the public API: `That`, `Returns`, `And`, `Or`, `Not`.
 - `pkg/proventest/` — test-only support: supplies the `_proven_atCompileTime` symbol (so test binaries link without the preprocessor) and exposes `WithChecks(fn func())` for opt-in runtime verification. Never imported from production code.
 
 ## The API surface
@@ -45,17 +45,17 @@ Tests can opt into running the block at runtime for wiring verification. `proven
 func That[T any]   (v T, preds ...func(T) bool)
 func Returns[T any](v T, preds ...func(T) bool) T
 
-func All[T any](preds ...func(T) bool) func(T) bool
-func Any[T any](preds ...func(T) bool) func(T) bool
+func And[T any](preds ...func(T) bool) func(T) bool
+func Or[T any](preds ...func(T) bool) func(T) bool
 func Not[T any](p func(T) bool)        func(T) bool
 ```
 
 That's it. No type parameters to wrangle at call sites, no marker interfaces, no combinator type hierarchies, no wrapper types to construct.
 
-`That` and `Returns` are variadic: multiple predicates AND-compose. For OR composition or reusable composite values, wrap with `All` / `Any` / `Not`:
+`That` and `Returns` are variadic: multiple predicates AND-compose. For OR composition or reusable composite values, wrap with `And` / `Or` / `Not`:
 
 ```go
-var smallPositive = proven.All(isPositive, lessThan100)
+var smallPositive = proven.And(isPositive, lessThan100)
 
 func setPercent(p int) {
     proven.That(p, smallPositive)
@@ -126,7 +126,7 @@ No proof-expression subsumption, no marker-interface synthesis, no wrapper-type 
 
 ## What's next
 
-1. `pkg/proven/proven.go` already carries the runtime-checkable `That` / `Returns` / `All` / `Any` / `Not` implementations.
+1. `pkg/proven/proven.go` already carries the runtime-checkable `That` / `Returns` / `And` / `Or` / `Not` implementations.
 2. `example/basic/` demonstrates the pattern end-to-end.
 3. The preprocessor skeleton is still to build: toolexec entry, per-package scan, flow analyzer, diagnostic emission. The scan step can follow rewire's shape closely.
 4. The `internal/*experiment` packages stay as regression documents for the Go-language behavior each rejected design relied on.

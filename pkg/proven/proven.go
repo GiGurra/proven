@@ -103,9 +103,11 @@ func Returns[T any](v T, preds ...func(T) bool) T {
 	return v
 }
 
-// All composes predicates into a single predicate that holds when every
-// operand holds.
-func All[T any](preds ...func(T) bool) func(T) bool {
+// And composes predicates into a single predicate that holds when every
+// operand holds. Use when you want the composite as a first-class value
+// — stored in a variable, passed to another helper, or supplied to
+// proven.Returns.
+func And[T any](preds ...func(T) bool) func(T) bool {
 	return func(v T) bool {
 		for _, p := range preds {
 			if !p(v) {
@@ -116,9 +118,9 @@ func All[T any](preds ...func(T) bool) func(T) bool {
 	}
 }
 
-// Any composes predicates into a single predicate that holds when at
+// Or composes predicates into a single predicate that holds when at
 // least one operand holds.
-func Any[T any](preds ...func(T) bool) func(T) bool {
+func Or[T any](preds ...func(T) bool) func(T) bool {
 	return func(v T) bool {
 		for _, p := range preds {
 			if p(v) {

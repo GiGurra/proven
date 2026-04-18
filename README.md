@@ -27,15 +27,34 @@ func FindUserID() int {
 }
 ```
 
-Signatures stay plain Go — no wrappers, no generics ceremony, no struct decorations. Multiple predicates in a `That` / `Returns` call are AND-composed; for OR composition or first-class predicate values use `proven.All`, `proven.Any`, `proven.Not`.
+Signatures stay plain Go — no wrappers, no generics ceremony, no struct decorations. Multiple predicates in a single `That` / `Returns` call are AND-composed, so the common case requires nothing extra. For OR composition, negation, or a reusable composite predicate you can pass around, use `proven.And`, `proven.Or`, `proven.Not`:
 
-Verify that a precondition is wired correctly in a test:
+```go
+var validCurrency = proven.Or(isUSD, isEUR, isGBP)
+var sensibleQty   = proven.And(isPositive, lessThan1000)
+var eligibleUser  = proven.Not(isBanned)
+
+func Charge(amount int, currency string, userID int) error {
+    proven.That(amount,   sensibleQty)
+    proven.That(currency, validCurrency)
+    proven.That(userID,   eligibleUser)
+    // ...
+}
+```
+
+The combinators return plain `func(T) bool`, so they compose freely and can be stored in package-level variables, looked up from maps, passed to `Returns`, or supplied directly to `That`.
+
+Compile-time contracts aren't new — Eiffel's Design by Contract, Ada's `Pre`/`Post` clauses, C++ `static_assert` and concepts, and Rust's type-state patterns are all takes on the same idea. Their shared failure mode is that a requirement verified only at compile time is fragile: nothing catches you accidentally removing it (*"why is this line here?"*), weakening it (someone narrows `isPositive` to `isNonNegative` in a refactor), or forgetting to state it in the first place.
+
+`proven` addresses this by letting you verify at *test* time that the declarations are what you think. The preprocessor erases `proven.That` at build as usual, but inside tests you can opt in to running the blocks at runtime and asserting that the right predicate fires on the right parameter:
 
 ```go
 proventest.AssertFails(t, isPositive, func() {
     Transfer(-5, "hi", "USD") // isPositive must reject -5
 })
 ```
+
+If someone later drops `proven.That(amount, isPositive)` from `Transfer`, this test fails — no violation fires. If they replace `isPositive` with a weaker predicate, the test fails with `expected isPositive to fire, got isNonNegative`. Production still runs with zero overhead; the runtime mode is strictly additive, and the test suite now defends the contract from silent drift.
 
 ## How it works
 
