@@ -120,6 +120,28 @@ No separate `NonNil[*User]` type, no wrapper-based newtype dance — just one pr
 
 Scope is deliberately narrow — only library-included predicates, only simple argument shapes, and package-level `const` references are not yet resolved. Future work may loosen these limits, potentially allowing some form of user-supplied compile-time inference.
 
+## Honest limits — mutation and soundness
+
+Facts about a variable reflect what the analyzer knows *at a program point*. Because Go has no immutability markers, any mutation invalidates prior facts. The preprocessor catches what it can syntactically and is explicit about the rest.
+
+**Invalidated automatically.** Reassigning `x`, `x++` / `x--`, compound assigns (`x += 1`), field / index writes (`x.a = ...`, `x[i] = ...`), and taking `&x` to pass it to a function all drop every fact on `x`. Downstream calls that needed those facts fail the build until you re-prove them (guard, `prove.Must`, `trust.That`, etc.):
+
+```go
+if proven.Positive(x) {
+    x = -1        // facts on x forgotten
+    target(x)    // cannot prove proven.Positive — build fails
+}
+
+if proven.Positive(x) {
+    mutate(&x)   // &x escapes; x's facts forgotten (callee might rewrite *x)
+    target(x)    // cannot prove — build fails
+}
+```
+
+**Known soundness gap.** A call like `mutateNestedStruct(root)` that reaches into a shared sub-object (through a pointer field, a slice, a map, a channel) can mutate state the analyzer has facts on without us seeing it. Without full escape / type analysis this is invisible, and the facts on `root` persist after the call.
+
+The honest advice: prove what you need, hand the value to the next call that needs the proof, and don't route it through functions that might mutate it in ways the analyzer can't trace. Functions meant to preserve a predicate should re-declare it as their own `proven.That` precondition — the chain stays visible at every hop, and the caller proves the predicate anew at each site where the fact might have become stale.
+
 ## How it compares
 
 Compile-time contracts aren't new — Eiffel's Design by Contract, Ada `Pre`/`Post`, C++ concepts, Rust's type-state patterns are all takes on the same idea. Their shared failure mode is that a requirement verified only at compile time is fragile: nothing catches you accidentally removing it, weakening it, or forgetting to state it.

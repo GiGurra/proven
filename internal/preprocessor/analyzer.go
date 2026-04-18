@@ -110,6 +110,23 @@ func (fs *FactSet) AddOr(alts []Predicate, v string) {
 	}
 }
 
+// Forget drops every fact recorded on v (leaf and disjunctive).
+// Called when v is reassigned, incremented, or otherwise mutated in
+// a way that could invalidate prior facts — the analyzer gives up
+// on the stored facts rather than trying to figure out which ones
+// still hold.
+func (fs *FactSet) Forget(v string) {
+	if v == "" {
+		return
+	}
+	for k := range fs.m {
+		if k.Var == v {
+			delete(fs.m, k)
+		}
+	}
+	delete(fs.ors, v)
+}
+
 // HasOr reports whether an exact-match disjunctive fact is recorded
 // on v (same set of alts, alt order irrelevant).
 func (fs *FactSet) HasOr(alts []Predicate, v string) bool {
@@ -411,11 +428,29 @@ func (a *analyzer) analyzeStmt(stmt ast.Stmt) {
 		a.analyzeIf(s)
 	case *ast.ExprStmt:
 		a.walkCalls(s.X)
+		// A call like `f(&x)` or `f(x)` on a pointer may mutate x —
+		// we cannot tell without the callee's body. Invalidate any
+		// ident whose address escapes into this expression.
+		a.invalidateAddrEscape(s.X)
 	case *ast.AssignStmt:
 		for _, rhs := range s.Rhs {
 			a.walkCalls(rhs)
 		}
+		// Reassignment invalidates: whatever the LHS identifier was
+		// bound to, it's bound to something new now.
+		for _, lhs := range s.Lhs {
+			a.forgetLHS(lhs)
+		}
 		a.applyAssignPostconditions(s)
+		// An `&x` anywhere in the RHS means x's address escaped —
+		// the new alias can mutate x invisibly to the analyzer.
+		for _, rhs := range s.Rhs {
+			a.invalidateAddrEscape(rhs)
+		}
+	case *ast.IncDecStmt:
+		if id, ok := s.X.(*ast.Ident); ok && id.Name != "_" {
+			a.facts.Forget(id.Name)
+		}
 	case *ast.DeclStmt:
 		if gen, ok := s.Decl.(*ast.GenDecl); ok {
 			for _, spec := range gen.Specs {
@@ -461,6 +496,79 @@ func (a *analyzer) analyzeStmt(stmt ast.Stmt) {
 		}
 		a.facts = saved
 	}
+}
+
+// forgetLHS drops facts on whatever identifier the assignment LHS
+// is about to clobber. Supported shapes:
+//
+//   - bare ident (`x = ...`, `x := ...`)
+//   - selector chain (`x.a.b = ...`) — forget the chain root x,
+//     since the mutation changes x's field state and any predicate
+//     that inspects x's fields may no longer hold
+//   - index (`x[i] = ...`) — forget x
+//   - `_` — no-op
+//
+// Dereference-assign (`*p = ...`) is NOT traced: without alias
+// tracking we do not know which variable p points at. This is a
+// documented gap — see the README "mutation and soundness" note.
+func (a *analyzer) forgetLHS(lhs ast.Expr) {
+	switch e := lhs.(type) {
+	case *ast.Ident:
+		if e.Name != "_" {
+			a.facts.Forget(e.Name)
+		}
+	case *ast.SelectorExpr:
+		if root := selectorChainRoot(e); root != "" {
+			a.facts.Forget(root)
+		}
+	case *ast.IndexExpr:
+		if id, ok := e.X.(*ast.Ident); ok && id.Name != "_" {
+			a.facts.Forget(id.Name)
+		}
+	}
+}
+
+// selectorChainRoot walks down `x.a.b.c` to the leftmost identifier
+// and returns its name; returns "" for selector chains that do not
+// bottom out in an ident (e.g. `pkg.Foo.Bar` where pkg is an import
+// alias — the root is not a local variable to forget).
+func selectorChainRoot(e *ast.SelectorExpr) string {
+	switch x := e.X.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.SelectorExpr:
+		return selectorChainRoot(x)
+	}
+	return ""
+}
+
+// invalidateAddrEscape walks expr (but not down into nested block
+// bodies) looking for `&ident` subexpressions. For each one, it
+// forgets the ident's facts — the address has escaped, so any
+// pointer-holding alias may mutate the value invisibly to the
+// analyzer from this point on.
+//
+// The blocks filter keeps if/for-body statements that contain
+// their own `&x` usage from triggering forgets on the outer scope.
+// Those inner scopes are already handled by the clone-and-restore
+// wrappers around analyzeBlock.
+func (a *analyzer) invalidateAddrEscape(expr ast.Expr) {
+	if expr == nil {
+		return
+	}
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if _, isBlock := n.(*ast.BlockStmt); isBlock {
+			return false
+		}
+		u, ok := n.(*ast.UnaryExpr)
+		if !ok || u.Op != token.AND {
+			return true
+		}
+		if id, ok := u.X.(*ast.Ident); ok && id.Name != "_" {
+			a.facts.Forget(id.Name)
+		}
+		return true
+	})
 }
 
 // analyzeIf handles the two if-statement patterns that establish

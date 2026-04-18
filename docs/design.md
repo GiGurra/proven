@@ -85,6 +85,26 @@ Patterns not supported in v1 — the preprocessor **fails the build** with a Go-
 - **Proof through complex argument expressions.** `That(transform(x), p)` still requires the subject to be a parameter identifier. Nested-*call*-expression arguments at ordinary call sites (`Target(transform(x))`) **are** supported — the analyzer virtualizes the inner call's advertised postcondition onto a synthetic variable for the outer discharge — but a non-call computed subject at a `proven.That` site itself is v2.
 - **Symbolic predicate reasoning beyond declared `infer` rules** (full SMT remains out of scope).
 
+## Mutation and soundness
+
+Facts in the analyzer are keyed on `(predicate, variable-name)` and represent what the analyzer knows *at a program point*. Because Go has no immutability markers, any mutation to a tracked variable invalidates the facts the analyzer held on it. The preprocessor catches what it can at the syntactic level and documents the rest.
+
+**Invalidated automatically (local mutation):**
+
+- Reassignment: `x = ...`, `x := ...` in a scope that reuses the name, compound assigns `x += 1`, and inc/dec `x++` / `x--` all forget every fact on `x`.
+- Field / index mutation on a tracked variable: `x.a = ...`, `x.a.b.c = ...`, `x[i] = ...` forget facts on `x` (the chain root). This is important for tuple-subject relations — mutating a sub-field invalidates the relation predicate.
+- Address escape: `&x` appearing in any call argument or assignment RHS forgets facts on `x`. Once the address has left the local scope, any alias can mutate the value invisibly to the analyzer.
+
+**NOT tracked (known gap):**
+
+- Mutation through a local pointer alias: `p := &x; *p = -1` — we do not resolve `p` back to `x` without alias tracking. The `&x` escape rule catches this indirectly (we've already forgotten x when `&x` was taken), so this is sound by construction today.
+- Mutation *through* a value handed to a black-box function: `mutateNestedStruct(root)` — without type info we cannot tell whether root is a pointer, whether the callee might reach into a shared sub-object, or whether any mutation has happened. Facts on `root` persist after the call. This is **unsound** in the general case.
+- Goroutine / channel writes to a shared pointee.
+
+**Honest advice.** Facts are point-in-time claims, not ownership guarantees. Prove what you need at the boundary, hand the value to the downstream call that needs the proof, and do not route it through functions that might mutate it before you are done. If a function is meant to preserve a predicate, declare the same predicate as a precondition on *its* parameter; the preprocessor then verifies the caller discharged it, and inside the callee the analyzer starts fresh with the predicate seeded.
+
+This mirrors what static analysis of a language without ownership types can reasonably deliver. A future iteration using `go/types` for alias and purity information could narrow the gap at the cost of a dependency and compile-time overhead.
+
 ## Relations between values
 
 Predicates are `func(T) bool` — strictly unary. A relation over multiple values ("controller `c` has authorized executor `e`", "session `s` is owned by user `u`") is expressed by packing the participating subjects into a domain struct and writing the predicate as unary over that struct:

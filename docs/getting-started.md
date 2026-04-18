@@ -124,6 +124,21 @@ Inside `target`'s body, `x` is known to be `isPositive` — that's the analyzer'
 
 You don't re-prove at every hop. You declare what each function needs once, and the caller proves it once at its call site.
 
+### Mutation invalidates facts
+
+A proof about `x` is a claim about what the analyzer knows at a particular program point. Once `x` is mutated, any prior facts are dropped:
+
+```go
+if isPositive(x) {
+    x = -1       // the isPositive fact is forgotten here
+    target(x)   // cannot prove isPositive — build fails
+}
+```
+
+The preprocessor catches all the **local** shapes automatically: `x = ...`, `x++`, `x -= 1`, `x.a = ...`, `x[i] = ...`, and `&x` escaping into a call. After any of these, facts on `x` are gone and a downstream call needing them fails until you re-prove it.
+
+What the analyzer **cannot** catch is mutation reachable through a function you hand the value to — a `mutateNestedStruct(root)` that reaches into `root.Child.Leaf` through a pointer field, for example. Without full escape / type analysis this is invisible, and facts on `root` persist after the call. Treat proofs as point-in-time claims: prove what you need, call the next function that needs it, and don't route proven values through functions that might mutate them in ways the compiler can't see. If a function is meant to preserve a predicate, declare it as that function's own precondition — the chain stays visible.
+
 ## Cache discipline
 
 Go's build cache key does **not** include toolexec state, so a cached `pkg/proven.a` from a plain `go build` (no preprocessor) and one from a `-toolexec=proven` build (with the preprocessor injecting the linker stub) collide. Symptoms:
