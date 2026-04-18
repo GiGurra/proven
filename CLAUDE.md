@@ -66,3 +66,9 @@ Files to scan after each change; update whichever are affected:
 - `docs/go-language-findings.md` — if an empirical Go-language fact we rely on changes, or we discover a new one.
 
 If a commit deletes code or infrastructure that held context (e.g. experiment packages), **the context it captured must move into a persistent doc in the same commit**. "It lived in that deleted file" is not a valid resume-point.
+
+## Naming is not frozen
+
+API identifiers, package boundaries, and file layouts here are chosen to read well at their point of use, not to be permanent. If a better name emerges during implementation or review — clearer reading, less ambiguity, better match to semantics — rename it. Update every reference (code, tests, docs, README snippets, example sketches) in the same commit, and note the prior name and rationale in the commit message so the change is easy to trace.
+
+Past renames included `FailsWith` → `AssertFails` and `All`/`Any` → `And`/`Or`; each caught a real issue with the previous name after a little living with it. Future renames are welcome under the same discipline.
