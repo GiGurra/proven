@@ -65,17 +65,18 @@ func setPercent(p int) {
 
 ## How callers discharge obligations
 
-The preprocessor accepts these discharge patterns in the caller:
+The preprocessor accepts these discharge patterns in the caller. All of them produce the same kind of fact in the analyzer — `{predicate: P, var: x}` — and any one of them discharges a `proven.That(x, P)` downstream. Pick whichever matches the shape of the surrounding code.
 
-- **Literal analysis.** `Transfer(42, "hi")` — `42 > 0` and `len("hi") > 0` are proven by constant evaluation.
 - **Preceding predicate check.** `if isPositive(x) { Transfer(x, ...) }` — inside the then-branch, `isPositive(x)` is a fact.
-- **Early-return guard.** `if !isPositive(x) { return }; Transfer(x, ...)` — after the guarded return, `isPositive(x)` is established.
+- **Early-return guard.** `if !isPositive(x) { return }; Transfer(x, ...)` — after the guarded return, `isPositive(x)` is established for the rest of the enclosing block.
 - **Conjoined guards.** `if isPositive(x) && x < 100 { ... }` — both clauses become facts in the then-branch.
-- **Flow from `Returns`.** Result of a function whose body declares `proven.Returns(v, isPositive)` flows into a matching `That` check without re-proof.
-- **Declared implication.** When the caller has established predicate `P` and the callee requires `Q`, the preprocessor discharges `Q` if the module declares `infer.From(P).To(Q)` (optionally with `.Given(ctx)`). Implications are trusted — no symbolic verification.
-- **Explicit trust (planned).** A future `proven.Trust(x, pred)` variant accepts the obligation as a deliberate runtime guard — useful at boundaries (deserialization, HTTP handlers) where static proof is impossible.
+- **Flow from `proven.Returns`.** Result of a function whose body declares `proven.Returns(v, isPositive)` flows into a matching `That` check without re-proof. The postcondition rides along via the Phase 6 cross-package sidecar, so it works across module boundaries.
+- **Boundary validation with [`prove`](companion-packages.md).** At an external boundary (HTTP body, decoded JSON, CLI arg, database row) static proof is impossible. `prove.That(raw, preds...) (T, error)` runs a runtime check and, on the `err == nil` branch, establishes each supplied predicate as a fact on the returned value. `prove.Must(raw, preds...) T` is the panic-on-fail variant for startup paths where failure is fatal. Both are real runtime guards that carry the proof forward into the remainder of the function.
+- **Local fact injection with [`trust`](companion-packages.md) — the "trust me" escape hatch.** Every other discharge path in proven gets the compiler (or a runtime check) behind the claim. `trust.That(v, preds...) T` is the one call site where *you* stand behind it instead: no runtime check, no static proof, the fact is accepted on your word and your git blame is the evidence. The preprocessor erases the call and treats each listed predicate as a fact on the LHS. Use when a value has already been validated by a mechanism the analyzer cannot see (external schema validator, prior audited invariant, DB CHECK constraint). Reach for `prove.Must` first if a free runtime check would do — `trust.That` earns its keep only when re-validation would duplicate a known-correct earlier check and the cost is meaningful.
+- **Declared implication.** When the caller has established predicate `P` and the callee requires `Q`, the preprocessor discharges `Q` if the module declares `infer.From(P).To(Q)` (optionally with `.Given(ctx)`). Implications are **trusted** — no symbolic verification — but `infertest.Verify(t, rule, samples...)` lets you property-test a rule at test time to catch declared-but-false implications.
 
 Patterns not supported in v1:
+- Literal analysis (`proven.That(42, isPositive)` — the constant `42` is not discharged even though it trivially satisfies the predicate; wrap in a guard).
 - Interprocedural flow into arbitrary helper functions.
 - Proof through complex argument expressions (`That(transform(x), p)` is v2).
 - Symbolic predicate reasoning beyond declared `infer` rules (full SMT remains out of scope).

@@ -1,8 +1,13 @@
-// Package trust declares compile-time proven facts on values that
-// the preprocessor cannot verify statically and the programmer
-// has chosen not to verify at runtime. It is the third shape on
-// the verification-cost / verification-strength axis the proven
-// system exposes:
+// Package trust is the "trust me" escape hatch in proven: the one
+// place where you assert a compile-time fact on your own word
+// instead of having the compiler or a runtime check stand behind
+// it. The preprocessor accepts the fact, erases the call, and
+// carries it forward like any other discharge path. If your
+// assertion is wrong, nothing catches it at build or runtime;
+// only the downstream code relying on the fact misbehaves.
+//
+// It is the third shape on the verification-cost / verification-
+// strength axis the proven system exposes:
 //
 //	prove.That(v, preds...) (T, error)  — runtime check, error return
 //	prove.Must(v, preds...) T           — runtime check, panic on fail

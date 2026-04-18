@@ -55,9 +55,9 @@ func handleTransfer(r *http.Request) error {
 
 **Use for:** HTTP handlers, JSON/XML/protobuf decoders, CLI arg parsing, config loaders, database row mapping — any place raw external data enters the program.
 
-## `trust` — unverified assertion (local fact injection)
+## `trust` — the "trust me" escape hatch
 
-For values the preprocessor cannot prove statically but that you do not want to verify at runtime either: data already validated by an external mechanism the analyzer cannot see (JSON schema validator, database CHECK constraint, upstream generated decoder, an audited business-logic invariant). Call-site naming makes the mechanism obvious:
+The one part of proven where the claim is yours, not the compiler's. Every other discharge path gets the compiler (or a runtime check) behind the fact; `trust.That` is the single call site where **you** sign for it instead. Used for values that have already been validated by a mechanism the analyzer cannot see — a JSON schema validator, a database CHECK constraint, an upstream generated decoder, an audited business-logic invariant — and where a redundant runtime re-check would be cost for no safety gain. Call-site naming makes the mechanism obvious:
 
 ```go
 // prove.That — runtime check, error return

@@ -244,17 +244,21 @@ func handleTransfer(r *http.Request) error {
 </details>
 
 <details>
-<summary><strong>Local fact injection — <code>pkg/trust</code></strong></summary>
+<summary><strong>The "trust me" escape hatch — <code>pkg/trust</code></strong></summary>
 
-Sometimes a value has already been validated by a mechanism the analyzer can't see — an external schema validator, a previously audited invariant, a database CHECK constraint. `trust.That` asserts the fact with **no runtime check**; the programmer takes responsibility.
+Every other discharge path in proven gets the compiler (or a runtime check) behind the claim. `trust.That` is the single call site where **you** stand behind it instead — no runtime check, no static proof, just your word and the git blame.
 
 ```go
 import "github.com/GiGurra/proven/pkg/trust"
 
-// v is known-positive by upstream validation; redundant re-check would be cost for no safety gain.
+// v is known-positive by upstream validation (schema validator, audited
+// invariant, DB CHECK constraint) — a redundant re-check would be cost
+// for no safety gain.
 v := trust.That(raw, isPositive)
-Transfer(v, note) // isPositive discharged
+Transfer(v, note) // isPositive discharged on the programmer's word
 ```
+
+Reach for `prove.Must` first if a free runtime check would do — `trust.That` earns its keep only when re-validation would duplicate a known-correct earlier check and the cost is meaningful.
 
 `trust.That` is **local** — the fact is injected into the enclosing function's flow state only. For a function-level postcondition every caller can see across packages, use `proven.Returns`.
 
