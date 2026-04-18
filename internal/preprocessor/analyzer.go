@@ -555,6 +555,21 @@ func collectGuardFacts(expr ast.Expr, imp *importInfo, importPath string, negate
 		if e.Op == token.LAND && !negated {
 			collectGuardFacts(e.X, imp, importPath, false, out)
 			collectGuardFacts(e.Y, imp, importPath, false, out)
+			return
+		}
+		// `x != nil` / `x == nil` plants the library NonNil / Nil
+		// predicate as a flow fact on x, so downstream callees that
+		// require proven.NonNil (or Nil) are satisfied without a
+		// redundant predicate call in the guard.
+		if e.Op == token.NEQ || e.Op == token.EQL {
+			if v, ok := nilCompareVar(e); ok {
+				isNonNil := (e.Op == token.NEQ) != negated
+				name := "Nil"
+				if isNonNil {
+					name = "NonNil"
+				}
+				out.Add(Fact{Pred: Predicate{Pkg: provenImportPath, Name: name}, Var: v})
+			}
 		}
 		// Conservatively ignore OR and negated-AND.
 	case *ast.ParenExpr:
@@ -570,6 +585,23 @@ func collectGuardFacts(expr ast.Expr, imp *importInfo, importPath string, negate
 			}
 		}
 	}
+}
+
+// nilCompareVar reports the variable name on one side of a `x != nil`
+// or `x == nil` BinaryExpr, accepting either order (`nil != x` works
+// too). Returns (_, false) when neither side is the bare `nil`
+// identifier or when the other side is not a plain identifier.
+func nilCompareVar(e *ast.BinaryExpr) (string, bool) {
+	lhsID, lhsIsIdent := e.X.(*ast.Ident)
+	rhsID, rhsIsIdent := e.Y.(*ast.Ident)
+	isNilIdent := func(id *ast.Ident) bool { return id != nil && id.Name == "nil" }
+	switch {
+	case rhsIsIdent && isNilIdent(rhsID) && lhsIsIdent && !isNilIdent(lhsID):
+		return lhsID.Name, true
+	case lhsIsIdent && isNilIdent(lhsID) && rhsIsIdent && !isNilIdent(rhsID):
+		return rhsID.Name, true
+	}
+	return "", false
 }
 
 // callAsPredicate matches a call expression of the form
@@ -825,9 +857,9 @@ func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
 		if idx >= len(call.Args) {
 			continue
 		}
-		argName, restore := a.bindArgForCheck(call.Args[idx], idx)
 		required := sum.ParamPreds[idx]
 		requiredOrs := sum.ParamOrs[idx]
+		argName, restore := a.bindArgForCheck(call.Args[idx], idx, required, requiredOrs)
 
 		var missing []Predicate
 		for _, p := range required {
@@ -894,43 +926,76 @@ func paramIndicesUnion(sum *FuncSummary) []int {
 // discharge for the idx-th argument, plus a `restore` closure that
 // reverses any facts the analyzer temporarily plants.
 //
-// Three cases:
+// Four cases, tried in order:
 //
 //   - arg is a plain identifier: use it as-is, no virtual plant.
 //   - arg is a nested *ast.CallExpr whose callee has postconditions
 //     (explicit or derived): clone the fact set, plant the callee's
 //     returnFacts on a synthetic variable name, and use that name.
-//     The restore closure puts the original fact set back so the
-//     virtual facts do not leak into subsequent statements.
-//   - any other expression (literal, binary, field access, …):
-//     return an empty argName. The discharge check fails for every
-//     predicate on that argument, same as before.
+//   - arg is a literal / simple compile-time expression AND one or
+//     more of the callee's required predicates is library-known
+//     (see litconst.go): evaluate each, plant a virtual fact for
+//     every predicate that holds on the literal, and use the
+//     synthetic variable for the discharge check. This is what lets
+//     target(5) satisfy proven.That(x, proven.Positive) at build
+//     time with no guard.
+//   - anything else: return an empty argName and let the discharge
+//     check report every predicate as missing.
 //
-// Only one level of nesting is examined per argument: the inner
-// call's own arg discharge fires independently at its own
-// recordCallDischarge pass when the analyzer walks the call. That
-// cascade is sufficient for the common `target(helper(x))` idiom
-// where every step has named-identifier inputs to its own callees.
-func (a *analyzer) bindArgForCheck(arg ast.Expr, idx int) (string, func()) {
+// The restore closure puts the original fact set back after the
+// per-argument check so virtual facts do not leak into subsequent
+// statements. Only one level of nesting is examined per argument;
+// deeper chains rely on the analyzer's own cascading recordCallDischarge.
+func (a *analyzer) bindArgForCheck(arg ast.Expr, idx int, required []Predicate, requiredOrs [][]Predicate) (string, func()) {
 	if name, ok := identName(arg); ok {
 		return name, noRestore
 	}
-	inner, ok := arg.(*ast.CallExpr)
-	if !ok {
-		return "", noRestore
+	if inner, ok := arg.(*ast.CallExpr); ok {
+		if pkg, key, ok := a.resolveCallee(inner); ok {
+			if sum, ok := a.lookupCalleeSummary(pkg, key); ok {
+				leaves, ors := returnFacts(sum)
+				if len(leaves) > 0 || len(ors) > 0 {
+					return a.plantVirtual(idx, leaves, ors)
+				}
+			}
+		}
 	}
-	pkg, key, ok := a.resolveCallee(inner)
-	if !ok {
-		return "", noRestore
+	// Literal evaluation against library-known predicates.
+	litLeaves := a.evalLiterals(arg, required, requiredOrs)
+	if len(litLeaves) > 0 {
+		return a.plantVirtual(idx, litLeaves, nil)
 	}
-	sum, ok := a.lookupCalleeSummary(pkg, key)
-	if !ok {
-		return "", noRestore
+	return "", noRestore
+}
+
+// evalLiterals runs each required predicate through the literal
+// evaluator and returns the subset that hold on arg. Or-obligations
+// are satisfied when any alt holds — we return that alt as a leaf
+// so the existing dischargedOr path picks it up via the any-leaf
+// rule. Predicates whose evaluator reports EvalSkip are ignored;
+// their discharge falls back to the normal paths.
+func (a *analyzer) evalLiterals(arg ast.Expr, required []Predicate, requiredOrs [][]Predicate) []Predicate {
+	var out []Predicate
+	for _, p := range required {
+		if evalLibraryPredicate(p, arg) == EvalHolds {
+			out = append(out, p)
+		}
 	}
-	leaves, ors := returnFacts(sum)
-	if len(leaves) == 0 && len(ors) == 0 {
-		return "", noRestore
+	for _, alts := range requiredOrs {
+		for _, p := range alts {
+			if evalLibraryPredicate(p, arg) == EvalHolds {
+				out = append(out, p)
+				break
+			}
+		}
 	}
+	return out
+}
+
+// plantVirtual clones the fact set, adds leaves and ors on a
+// synthetic `$argN` variable, and returns the name plus a restore
+// closure that puts the original fact set back.
+func (a *analyzer) plantVirtual(idx int, leaves []Predicate, ors [][]Predicate) (string, func()) {
 	saved := a.facts
 	a.facts = saved.Clone()
 	vname := fmt.Sprintf("$arg%d", idx)

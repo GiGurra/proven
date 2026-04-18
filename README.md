@@ -95,32 +95,74 @@ See [Setup](#setup--ide-and-cache-configuration) below for the split-cache setup
 <details>
 <summary><strong>Nil safety</strong> — one predicate, every pointer type</summary>
 
-Predicates can be generic. Declare `nonNil` once and the Go compiler's type inference instantiates it at every call site for whatever pointer type is in scope. The preprocessor treats the bare identifier as one predicate across all instantiations, so every `proven.That(p, nonNil)` and `if nonNil(p) { ... }` interoperates.
+`pkg/proven` ships a generic `NonNil[T any](p *T) bool` (and its partner `Nil`). Declare the precondition once; Go's type inference instantiates at every call site and the preprocessor enforces non-nilness everywhere a pointer flows.
 
 ```go
-func nonNil[T any](p *T) bool { return p != nil }
-
 func greet(u *User) {
-    proven.That(u, nonNil)
+    proven.That(u, proven.NonNil)
     _ = u.Name // safe — greet declared its input is non-nil
 }
 
 func handler(id int) {
-    u, err := prove.That(lookupUser(id), nonNil) // runtime nil-check at the boundary
+    u, err := prove.That(lookupUser(id), proven.NonNil) // runtime nil-check at the boundary
     if err != nil {
         return
     }
-    greet(u) // nonNil is proven; compiler accepts the call
+    greet(u) // proven.NonNil carries forward; compiler accepts the call
 }
 ```
 
-A caller that forgets the guard fails the build:
+Four shapes prove `proven.NonNil(u)` at the call site:
+
+- `if u != nil { greet(u) }` — the plain Go nil-compare in a guard.
+- `if u == nil { return }; greet(u)` — early-return; after the nil-bail, `u` is known non-nil for the rest of the function.
+- `&User{...}`, `new(User)`, `make(...)` passed as an argument — known non-nil at compile time, accepted with no runtime check.
+- `if proven.NonNil(u) { greet(u) }` — the predicate call in a guard, same shape as every other `if pred(x)`.
+
+A caller that forgets all of them fails the build:
 
 ```
-main.go:NN:CC: proven: cannot prove nonNil on parameter 0 of greet
+main.go:NN:CC: proven: cannot prove proven.NonNil on parameter 0 of greet
 ```
 
 No generics ceremony at the call site, no separate `NonNil[*User]` or `*NonNilUser` types — just one predicate, enforced everywhere a pointer flows.
+
+</details>
+
+<details>
+<summary><strong>Library predicates + compile-time literal evaluation</strong></summary>
+
+`pkg/proven` ships a small, vetted set of common predicates:
+
+| Predicate | Applies to | True when |
+|-----------|------------|-----------|
+| `Positive`, `Negative`, `NonNegative`, `NonPositive`, `Zero`, `NonZero` | any numeric kind | sign / zero comparison |
+| `Even`, `Odd` | any integer kind | parity |
+| `NonEmpty`, `Empty` | string | `len(s) > 0` / `== 0` |
+| `NonNil`, `Nil` | `*T` for any T | pointer check |
+
+They're ordinary generic functions. You can use them anywhere a predicate is accepted (`proven.That`, `prove.That`, `trust.That`, guards, inference rules).
+
+**Literal arguments are evaluated at build time.** When a caller passes an integer / float / string literal, `nil`, or an address-of-composite (`&User{}`, `new(T)`, `make(...)`) to a function whose precondition is one of the library predicates, the preprocessor evaluates the predicate on the literal and accepts the call with no runtime check:
+
+```go
+func target(n int)      { proven.That(n, proven.Positive) }
+func greet(s string)    { proven.That(s, proven.NonEmpty) }
+func touch(p *User)     { proven.That(p, proven.NonNil) }
+
+target(42)              // 42 > 0 at compile time — accepted
+target(-1)              // -1 > 0 is false — BUILD FAILS
+greet("hello")          // len("hello") > 0 — accepted
+touch(&User{ID: 1})     // &T{} is non-nil — accepted
+touch(nil)              // nil is nil — BUILD FAILS
+```
+
+**Scope.** Compile-time inference for literals and constants is deliberately narrow right now:
+
+- **Only library-included predicates** listed above are evaluated. A user-defined `func isPositive(x int) bool` that is semantically identical is **not** recognized — use `proven.Positive` if you want literal auto-proof, or prove the precondition the normal way (guard, `prove.Must`, `trust.That`).
+- **Only simple argument shapes** are recognized: bare literals, unary-minus on a numeric literal, `nil`, `&T{...}`, `new(T)`, `make(...)`. Package-level `const` references and arbitrary compile-time expressions (`1 << 10`, `len("x")`, `-aConst`) are not yet evaluated.
+
+Future work may lift these limits — potentially by allowing some form of user-supplied compile-time evaluation, or by extending the evaluator to Go-const references. For now the surface is small on purpose: the set is vetted, and users who want stronger auto-proof today reach for a guard, a boundary validator, or `trust.That`.
 
 </details>
 

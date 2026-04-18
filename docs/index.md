@@ -74,26 +74,36 @@ Proven shifts that burden onto the compiler. A function declares once what must 
 
 ### Nil safety
 
-Predicates are generic. `func nonNil[T any](p *T) bool` declared once gives statically-checked nil safety across every pointer in the codebase:
+`pkg/proven` ships a generic `NonNil[T any](p *T) bool`. Declare the precondition once; the preprocessor enforces non-nilness at every call site:
 
 ```go
-func nonNil[T any](p *T) bool { return p != nil }
-
 func greet(u *User) {
-    proven.That(u, nonNil)
-    _ = u.Name // safe — greet's input is non-nil by contract
+    proven.That(u, proven.NonNil)
+    _ = u.Name
 }
 
 func handler(id int) {
-    u, err := prove.That(lookupUser(id), nonNil) // runtime nil-check at the boundary
+    u, err := prove.That(lookupUser(id), proven.NonNil)
     if err != nil {
         return
     }
-    greet(u) // nonNil is proven; compiler accepts the call
+    greet(u) // proven.NonNil carries forward; compiler accepts the call
 }
 ```
 
-Every `proven.That(p, nonNil)` is enforced; every unguarded call of a function that requires `nonNil` fails the build with a clear diagnostic. No separate `NonNil[*User]` type, no wrapper-based newtype dance — just one predicate, inferred by the Go compiler at every call site.
+Any of the usual Go nil-safety idioms prove it at the call site:
+
+- `if u != nil { greet(u) }`
+- `if u == nil { return }; greet(u)`
+- passing `&User{...}`, `new(User)`, or a non-nil `make(...)` — known non-nil at compile time
+
+No separate `NonNil[*User]` type, no wrapper-based newtype dance — just one predicate, enforced everywhere a pointer flows.
+
+### Library predicates and compile-time literal evaluation
+
+`pkg/proven` also ships `Positive`, `Negative`, `NonNegative`, `NonPositive`, `Zero`, `NonZero`, `Even`, `Odd`, `NonEmpty`, `Empty`, and `Nil` alongside `NonNil`. When a caller passes a literal (integer, float, string) or a simple compile-time expression (`nil`, `&T{...}`, `new(T)`, `make(...)`) to a function whose precondition is one of these library predicates, the preprocessor evaluates the predicate at build time and accepts the call with no runtime check.
+
+Scope is deliberately narrow — only library-included predicates, only simple argument shapes, and package-level `const` references are not yet resolved. Future work may loosen these limits, potentially allowing some form of user-supplied compile-time inference.
 
 ## How it compares
 
