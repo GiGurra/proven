@@ -78,13 +78,13 @@ If someone later drops `proven.That(amount, isPositive)` from `Transfer`, this t
 
 ## Status
 
-Pre-alpha. The runtime-stub API is in place (`pkg/proven`, `pkg/proventest`); the preprocessor itself is not yet built.
+Pre-alpha. Runtime API (`pkg/proven`, `pkg/proventest`, `pkg/prove`, `pkg/infer`) is in place. The preprocessor is under construction: Phase 1 — stub injection so any program using `proven.That` links under `-toolexec=proven` — is done. Flow-sensitive discharge, rewrite-on-success, diagnostic-on-failure, and cross-package obligation summaries follow.
 
-See [`docs/design.md`](docs/design.md) for the authoritative design, and [`docs/companion-packages.md`](docs/companion-packages.md) for the planned `prove` (runtime boundary validation) and `infer` (compile-time evaluation) siblings.
+See [`docs/design.md`](docs/design.md) for the authoritative design, [`docs/companion-packages.md`](docs/companion-packages.md) for the planned `prove` (runtime boundary validation) and `infer` (compile-time evaluation) siblings, and [`docs/todo/roadmap.md`](docs/todo/roadmap.md) for the preprocessor plan.
 
 ## Related work
 
-- [`rewire`](https://github.com/GiGurra/rewire) — the `-toolexec` pipeline this project will reuse.
+- [`rewire`](https://github.com/GiGurra/rewire) — the `-toolexec` pipeline this project reuses: AST-based scanning of compile argv, temp-file source augmentation, and cache-invalidation strategy.
 - [`fl`](https://github.com/GiGurra/fl) — the thought experiment that motivated the constraint / comptime ideas.
 
 ## License

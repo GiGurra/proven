@@ -41,9 +41,9 @@ Earlier design iterations. Do not build on these; retained to explain why the cu
 - `pkg/infer/` — fluent inference-rule builder (`From(...).Given(...).To(...)`); `Rule` marker type.
 - `example/basic/` — end-to-end usage sketch with wiring-verification tests (`TestWiring_*`).
 - `example/boundary/` — `prove` → `proven` flow example with wiring tests.
-- `cmd/proven/` — toolexec binary scaffold (currently a pure forwarder).
-- `internal/preprocessor/e2e_test.go` — golden-file harness over `testdata/cases/`.
-- **Preprocessor behavior: not started.** Roadmap in [`docs/todo/roadmap.md`](docs/todo/roadmap.md). Seed fixtures under `testdata/cases/` validate the harness in both success and failure directions.
+- `cmd/proven/` — toolexec shim. All behavior lives in `internal/preprocessor`.
+- `internal/preprocessor/` — AST-based preprocessor package (`run.go` / `compile.go` / `provenstub.go`) plus its `e2e_test.go` golden-file harness over `testdata/cases/` and a `provenstub_test.go` unit suite.
+- **Preprocessor behavior: Phase 1 done.** Stub injection: `compile` invocations for `github.com/GiGurra/proven/pkg/proven` get a companion `.go` file whose signature is derived by AST-parsing the source in the compile's own argv. That file provides the `_proven_atCompileTime` linker symbol as a no-op, so any program using `proven.That` links under `-toolexec=proven`. Roadmap in [`docs/todo/roadmap.md`](docs/todo/roadmap.md).
 
 ## Conventions
 
@@ -51,6 +51,22 @@ Earlier design iterations. Do not build on these; retained to explain why the cu
 - Multiple predicates in a `That` / `Returns` call are AND-composed (variadic). For OR or first-class predicate values, use `And` / `Or` / `Not`.
 - Runtime behavior of `That` / `Returns` is only observable via `proventest.WithChecks` in test code. Production runs never reach the block body: either the preprocessor erased it, or the link failed.
 - The preprocessor's job is narrow: scan bodies for `That` / `Returns`, build per-function obligation summaries, discharge them at call sites via flow analysis using `infer` rules as implication axioms, erase on success, fail on unproven. No type-level algebra, no SMT.
+- **Preprocessor architecture: parse, don't template.** Every pass reads the source files the Go toolchain handed the compiler and works from their AST (`go/parser`, `go/ast`, `go/printer`) — shape follows `github.com/GiGurra/rewire`. Synthesized files are emitted to `$TMPDIR` and appended to the compile argv; the on-disk source tree is never modified. Do not hardcode symbol names, signatures, or textual templates that duplicate what is already in the source — derive them from the AST so API evolution in `pkg/proven` / `pkg/infer` flows through mechanically.
+
+## Developing the preprocessor
+
+**Cache discipline.** Go's build cache key does **not** include the toolexec binary's effect on source. A cached `pkg/proven.a` from a plain `go test` (no stub) and one from a `-toolexec=proven` build (with stub) have the same key — whichever ran first wins. Symptoms of the mismatch:
+
+- `relocation target _proven_atCompileTime not defined` — a toolexec build reused a stub-less artifact.
+- `duplicated definition of symbol _proven_atCompileTime, from ... proventest ... and ... proven` — a non-toolexec test binary (pulling in `proventest`) reused a stub-containing artifact.
+
+Three protections are in place so you rarely have to think about this:
+
+1. The e2e harness sets `GOCACHE` to a harness-owned tempdir, so `go test ./...` and `go test ./internal/preprocessor/...` do not cross-contaminate.
+2. When running toolexec builds manually against an existing module, keep a dedicated `GOCACHE` for them: `GOCACHE=$(mktemp -d) go build -toolexec=/path/to/proven ./...` — or run `go clean -cache` between preprocessor-on and preprocessor-off flows.
+3. Rebuild the preprocessor after any change to `cmd/proven` or `internal/preprocessor` before re-running toolexec builds: `go install ./cmd/proven` (or whatever wrapper you invoke). The e2e harness already does this in `TestMain`; manual loops must do it explicitly, because the old binary on `$PATH` will not auto-update.
+
+If Phase 6 lands, rewire's `$GOCACHE/rewire/targets-*.hash` pattern (a sentinel file that the preprocessor checks and asks the user to `go clean -cache` on mismatch) is the reference point — see `/Users/johkjo/git/rewire/internal/toolexec/cacheinval.go`.
 
 ## Keep the docs fresh
 

@@ -32,7 +32,10 @@ import (
 // preprocessor: "did my fixture build?", and "if not, did the diagnostic
 // contain the right text?"
 
-var provenBin string
+var (
+	provenBin string
+	goCache   string
+)
 
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "proven-e2e-*")
@@ -41,6 +44,21 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	provenBin = filepath.Join(dir, "proven")
+
+	// Isolated GOCACHE for every fixture build. Go's build cache key
+	// does not include toolexec behavior: a prior non-toolexec build
+	// of pkg/proven leaves a stub-less artifact in the host cache
+	// which fixtures would then reuse, failing to link with
+	// "relocation target _proven_atCompileTime not defined". A prior
+	// toolexec build would pollute the other direction with a
+	// stub-containing artifact that clashes with proventest. Isolation
+	// makes the harness deterministic regardless of host cache state.
+	goCache = filepath.Join(dir, "gocache")
+	if err := os.MkdirAll(goCache, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "failed to create gocache:", err)
+		os.RemoveAll(dir)
+		os.Exit(1)
+	}
 
 	cmd := exec.Command("go", "build", "-o", provenBin, "./cmd/proven")
 	cmd.Dir = repoRoot()
@@ -148,6 +166,14 @@ replace github.com/GiGurra/proven => %s
 func runIn(dir, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
+	// Every fixture build uses the harness-owned GOCACHE. Anything the
+	// host cache holds for pkg/proven would be either stub-less (from
+	// a plain go test run) or stub-containing (from a prior e2e run),
+	// and Go's cache key does not distinguish the two — the link step
+	// would fail non-deterministically depending on order. The
+	// isolated cache makes the harness a hermetic test of what the
+	// preprocessor itself produces.
+	cmd.Env = append(os.Environ(), "GOCACHE="+goCache)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

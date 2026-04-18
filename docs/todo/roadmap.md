@@ -8,25 +8,16 @@ This is the resume-point for preprocessor work: what's done, what's next, and wh
 - Package scaffolding: `pkg/proven`, `pkg/proventest`, `pkg/prove`, `pkg/infer`.
 - Runtime APIs: `That`, `Returns`, `And` / `Or` / `Not`, `Violation`, `PredicateName`, `WithChecks`, `AssertFails`, `AssertAnyFailure`, `prove.That`, `prove.Must`, `infer.From(...).Given(...).To(...)`.
 - Linker gate: `atCompileTime` declared via `//go:linkname` to the unresolved `_proven_atCompileTime` symbol.
-- `cmd/proven/`: toolexec binary — currently a pure forwarder.
-- `internal/preprocessor/e2e_test.go`: golden-file harness that runs the real Go toolchain on fixtures under `testdata/cases/`.
-- Seed fixtures: `noop_ok`, `basic_proven_use_needs_preprocessor`.
+- `cmd/proven/`: toolexec shim; all logic in `internal/preprocessor/`.
+- `internal/preprocessor/`: AST-based preprocessor (`run.go` / `compile.go` / `provenstub.go`) + unit tests + golden-file e2e harness (`e2e_test.go`) running the real Go toolchain on fixtures under `testdata/cases/`, with an isolated `GOCACHE` per test run.
+- Fixtures: `noop_ok`, `basic_proven_use_links_ok`.
+- **Phase 1 (stub injection).** Any program using `proven.That` links under `-toolexec=proven`. The preprocessor detects `compile` invocations for `github.com/GiGurra/proven/pkg/proven`, parses the source files the compiler received, finds the `//go:linkname` declaration for `_proven_atCompileTime`, derives the stub's signature from the matched `FuncType`, writes a companion `.go` file to `$TMPDIR`, and appends it to the compile argv.
 
-**Not done.** Preprocessor has no actual behavior yet. Everything below is open work.
+**Not done.** Everything below is open work.
 
 ## Phases
 
 Roughly sequential — each phase relies on the previous — but the harness tolerates incremental progress: add a fixture for a behavior, go red, implement until it's green.
-
-### Phase 1 — Stub injection for `pkg/proven`
-
-**Goal.** Any program using `proven.That` links.
-
-- `cmd/proven` detects `compile` invocations (`argv[1]` ends in `compile`).
-- Inspects compile args for the target package (`-p <importpath>`).
-- When the target is `github.com/GiGurra/proven/pkg/proven`, synthesize a Go file that defines `_proven_atCompileTime` as a no-op and add it to the compile's source list before forwarding.
-
-**Fixtures.** Replace `basic_proven_use_needs_preprocessor` with `basic_proven_use_links_ok` (expected.txt empty).
 
 ### Phase 2 — Per-package obligation scan
 
