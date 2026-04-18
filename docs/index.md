@@ -74,28 +74,43 @@ Proven shifts that burden onto the compiler. A function declares once what must 
 
 ### Nil safety
 
-`pkg/proven` ships a generic `NonNil[T any](p *T) bool`. Declare the precondition once; the preprocessor enforces non-nilness at every call site:
+`pkg/proven` ships a generic `NonNil[T any](p *T) bool`. Declare the precondition once; the preprocessor reads the ordinary Go nil-safety idioms and enforces non-nilness at every call site:
 
 ```go
 func greet(u *User) {
     proven.That(u, proven.NonNil)
-    _ = u.Name
+    _ = u.Name // safe — greet's input is non-nil by contract
 }
 
-func handler(id int) {
+// Plain Go nil-compare in a guard.
+func byCompare(u *User) {
+    if u != nil {
+        greet(u) // proven.NonNil(u) holds in the then-branch
+    }
+}
+
+// Early-return nil-bail — u is known non-nil for the rest of the function.
+func byEarlyReturn(u *User) {
+    if u == nil {
+        return
+    }
+    greet(u)
+}
+
+// Boundary validation — runtime nil-check, fact carries forward on err==nil.
+func byBoundary(id int) {
     u, err := prove.That(lookupUser(id), proven.NonNil)
     if err != nil {
         return
     }
-    greet(u) // proven.NonNil carries forward; compiler accepts the call
+    greet(u)
 }
+
+// Known-non-nil literal expressions accepted at build time with no
+// runtime check — &T{...}, new(T), make(...) are never nil.
+greet(&User{ID: 1})
+greet(new(User))
 ```
-
-Any of the usual Go nil-safety idioms prove it at the call site:
-
-- `if u != nil { greet(u) }`
-- `if u == nil { return }; greet(u)`
-- passing `&User{...}`, `new(User)`, or a non-nil `make(...)` — known non-nil at compile time
 
 No separate `NonNil[*User]` type, no wrapper-based newtype dance — just one predicate, enforced everywhere a pointer flows.
 

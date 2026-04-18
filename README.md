@@ -100,26 +100,46 @@ See [Setup](#setup--ide-and-cache-configuration) below for the split-cache setup
 ```go
 func greet(u *User) {
     proven.That(u, proven.NonNil)
-    _ = u.Name // safe — greet declared its input is non-nil
-}
-
-func handler(id int) {
-    u, err := prove.That(lookupUser(id), proven.NonNil) // runtime nil-check at the boundary
-    if err != nil {
-        return
-    }
-    greet(u) // proven.NonNil carries forward; compiler accepts the call
+    _ = u.Name // safe — greet's input is non-nil by contract
 }
 ```
 
-Four shapes prove `proven.NonNil(u)` at the call site:
+The ordinary Go nil-safety idioms prove `proven.NonNil(u)` at the call site — the preprocessor reads them directly, no separate predicate call needed:
 
-- `if u != nil { greet(u) }` — the plain Go nil-compare in a guard.
-- `if u == nil { return }; greet(u)` — early-return; after the nil-bail, `u` is known non-nil for the rest of the function.
-- `&User{...}`, `new(User)`, `make(...)` passed as an argument — known non-nil at compile time, accepted with no runtime check.
-- `if proven.NonNil(u) { greet(u) }` — the predicate call in a guard, same shape as every other `if pred(x)`.
+```go
+// Plain Go nil-compare in a guard.
+func byCompare(u *User) {
+    if u != nil {
+        greet(u) // proven.NonNil(u) holds in the then-branch
+    }
+}
 
-A caller that forgets all of them fails the build:
+// Early-return nil-bail — after this, u is known non-nil.
+func byEarlyReturn(u *User) {
+    if u == nil {
+        return
+    }
+    greet(u) // the post-guard continuation sees proven.NonNil(u)
+}
+
+// Runtime nil-check at a boundary, fact carries forward on err==nil.
+func byBoundary(id int) {
+    u, err := prove.That(lookupUser(id), proven.NonNil)
+    if err != nil {
+        return
+    }
+    greet(u)
+}
+
+// Known-non-nil literal expressions accepted at build time with no
+// runtime check — &T{...}, new(T), make(...) are never nil.
+func byLiteral() {
+    greet(&User{ID: 1, Name: "Alice"})
+    greet(new(User))
+}
+```
+
+A caller that skips every guard fails the build:
 
 ```
 main.go:NN:CC: proven: cannot prove proven.NonNil on parameter 0 of greet
