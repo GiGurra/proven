@@ -9,7 +9,7 @@ import (
 // Conjoined guard (&&) — both facts in the body.
 func CallBoth(x int) int {
 	if preds.IsPositive(x) && preds.IsSmall(x) {
-		_ = l00.Target(x)    // IsPositive discharges
+		_ = l00.Target(x)      // IsPositive discharges
 		return l01.Compound(x) // IsPositive + IsSmall both discharge
 	}
 	return 0

@@ -71,8 +71,11 @@ func newFactSet() *FactSet {
 	return &FactSet{m: make(map[Fact]struct{})}
 }
 
-func (fs *FactSet) Add(f Fact)                         { fs.m[f] = struct{}{} }
-func (fs *FactSet) Has(pred Predicate, v string) bool  { _, ok := fs.m[Fact{Pred: pred, Var: v}]; return ok && v != "" }
+func (fs *FactSet) Add(f Fact) { fs.m[f] = struct{}{} }
+func (fs *FactSet) Has(pred Predicate, v string) bool {
+	_, ok := fs.m[Fact{Pred: pred, Var: v}]
+	return ok && v != ""
+}
 func (fs *FactSet) Clone() *FactSet {
 	out := newFactSet()
 	for f := range fs.m {
@@ -252,12 +255,12 @@ func (a *analyzer) analyzeStmt(stmt ast.Stmt) {
 // analyzeIf handles the two if-statement patterns that establish
 // facts:
 //
-//   1. `if guard { body }` — facts implied by guard hold inside
-//      body. On exit, if body always escapes, the negation of
-//      guard's facts persists to subsequent statements.
-//   2. `if guard { body } else { elseBody }` — guard-facts hold
-//      inside body, their negation inside elseBody. If exactly
-//      one branch escapes, the other's surviving facts persist.
+//  1. `if guard { body }` — facts implied by guard hold inside
+//     body. On exit, if body always escapes, the negation of
+//     guard's facts persists to subsequent statements.
+//  2. `if guard { body } else { elseBody }` — guard-facts hold
+//     inside body, their negation inside elseBody. If exactly
+//     one branch escapes, the other's surviving facts persist.
 //
 // The escape check recognizes ReturnStmt and calls to panic as
 // unconditional exits; anything else is treated as fall-through

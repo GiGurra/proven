@@ -6,8 +6,8 @@ import (
 
 	// Blank import of proventest supplies the _proven_atCompileTime symbol
 	// so this test binary can link without the proven preprocessor.
-	"github.com/GiGurra/proven/pkg/proventest"
 	"github.com/GiGurra/proven/pkg/proven"
+	"github.com/GiGurra/proven/pkg/proventest"
 )
 
 // 1. Boundary: valid inputs pass through prove.That and reach Transfer.

@@ -90,7 +90,7 @@ func readImportSummaries(importcfgPath string) (map[string]*PackageSummary, erro
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	out := make(map[string]*PackageSummary)
 	scanner := bufio.NewScanner(f)

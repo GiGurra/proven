@@ -56,7 +56,7 @@ func TestMain(m *testing.M) {
 	goCache = filepath.Join(dir, "gocache")
 	if err := os.MkdirAll(goCache, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "failed to create gocache:", err)
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		os.Exit(1)
 	}
 
@@ -65,12 +65,12 @@ func TestMain(m *testing.M) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintln(os.Stderr, "failed to build cmd/proven:")
 		fmt.Fprintln(os.Stderr, string(out))
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		os.Exit(1)
 	}
 
 	code := m.Run()
-	os.RemoveAll(dir)
+	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
 

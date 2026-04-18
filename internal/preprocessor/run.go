@@ -38,14 +38,14 @@ import (
 // and CI log scrapers handle them without special casing.
 func Run(args []string, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "proven: expected toolexec invocation (<tool-path> [args...])")
+		_, _ = fmt.Fprintln(stderr, "proven: expected toolexec invocation (<tool-path> [args...])")
 		return 2
 	}
 
 	toolPath, toolArgs := args[0], args[1:]
 	plan, err := planCompile(toolPath, toolArgs)
 	if err != nil {
-		fmt.Fprintf(stderr, "proven: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "proven: %v\n", err)
 		return 1
 	}
 	if plan != nil && plan.Cleanup != nil {
@@ -53,7 +53,7 @@ func Run(args []string, stderr io.Writer) int {
 	}
 	if plan != nil && len(plan.Diags) > 0 {
 		for _, d := range plan.Diags {
-			fmt.Fprintln(stderr, d)
+			_, _ = fmt.Fprintln(stderr, d)
 		}
 		return 1
 	}
@@ -69,7 +69,7 @@ func Run(args []string, stderr io.Writer) int {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return exitErr.ExitCode()
 		}
-		fmt.Fprintf(stderr, "proven: failed to run %s: %v\n", toolPath, err)
+		_, _ = fmt.Fprintf(stderr, "proven: failed to run %s: %v\n", toolPath, err)
 		return 1
 	}
 	return 0

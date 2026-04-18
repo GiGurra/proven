@@ -9,9 +9,9 @@ import (
 	"github.com/GiGurra/proven/pkg/infertest"
 )
 
-func isPositive(x int) bool       { return x > 0 }
-func isSmallPositive(x int) bool  { return x > 0 && x < 100 }
-func isEven(x int) bool           { return x%2 == 0 }
+func isPositive(x int) bool        { return x > 0 }
+func isSmallPositive(x int) bool   { return x > 0 && x < 100 }
+func isEven(x int) bool            { return x%2 == 0 }
 func isGreaterThanZero(x int) bool { return x > 0 }
 
 // TestVerify_SoundRulePasses — a correct implication passes Verify

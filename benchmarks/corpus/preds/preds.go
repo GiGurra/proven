@@ -18,10 +18,10 @@ func IsMidRange(x int) bool      { return x >= 100 && x < 1000 }
 func IsInByteRange(x int) bool   { return x >= 0 && x < 256 }
 
 // String predicates.
-func IsNonEmpty(s string) bool  { return len(s) > 0 }
-func IsAllLower(s string) bool  { return s == strings.ToLower(s) }
-func IsAllUpper(s string) bool  { return s == strings.ToUpper(s) }
-func HasPrefix_(s string) bool  { return strings.HasPrefix(s, "_") }
+func IsNonEmpty(s string) bool { return len(s) > 0 }
+func IsAllLower(s string) bool { return s == strings.ToLower(s) }
+func IsAllUpper(s string) bool { return s == strings.ToUpper(s) }
+func HasPrefix_(s string) bool { return strings.HasPrefix(s, "_") }
 func NoWhitespace(s string) bool {
 	return !strings.ContainsAny(s, " \t\n\r")
 }

@@ -212,7 +212,7 @@ func rewritePlan(toolArgs []string, sources []string, files []*ast.File, fset *t
 		if err != nil {
 			// Best-effort cleanup of what we wrote so far.
 			for _, p := range tempPaths {
-				os.Remove(p)
+				_ = os.Remove(p)
 			}
 			return nil, fmt.Errorf("write rewritten %s: %w", src, err)
 		}
@@ -234,7 +234,7 @@ func rewritePlan(toolArgs []string, sources []string, files []*ast.File, fset *t
 	}
 	cleanup := func() {
 		for _, p := range tempPaths {
-			os.Remove(p)
+			_ = os.Remove(p)
 		}
 	}
 	return &Plan{NewArgs: newArgs, Cleanup: cleanup}, nil
@@ -253,7 +253,7 @@ func writeRewrittenTemp(origPath string, content []byte) (string, error) {
 	}
 	path := dir + string(os.PathSeparator) + filepathBase(origPath)
 	if err := os.WriteFile(path, content, 0o644); err != nil {
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		return "", err
 	}
 	return path, nil

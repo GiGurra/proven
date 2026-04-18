@@ -196,14 +196,14 @@ func writeTempGoFile(pattern string, content []byte) (string, func(), error) {
 		return "", nil, err
 	}
 	if _, err := f.Write(content); err != nil {
-		f.Close()
-		os.Remove(f.Name())
+		_ = f.Close()
+		_ = os.Remove(f.Name())
 		return "", nil, err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(f.Name())
+		_ = os.Remove(f.Name())
 		return "", nil, err
 	}
 	path := f.Name()
-	return path, func() { os.Remove(path) }, nil
+	return path, func() { _ = os.Remove(path) }, nil
 }

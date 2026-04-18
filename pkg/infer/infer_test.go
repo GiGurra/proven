@@ -6,9 +6,9 @@ import (
 	"github.com/GiGurra/proven/pkg/infer"
 )
 
-func isPositive(x int) bool      { return x > 0 }
-func isSmallPositive(x int) bool { return x > 0 && x < 100 }
-func isEven(x int) bool           { return x%2 == 0 }
+func isPositive(x int) bool        { return x > 0 }
+func isSmallPositive(x int) bool   { return x > 0 && x < 100 }
+func isEven(x int) bool            { return x%2 == 0 }
 func isGreaterThanZero(x int) bool { return x > 0 }
 
 // Package-scope inference declarations. These compile-time facts are
@@ -22,8 +22,8 @@ var _ = infer.From(isEven).Given(isGreaterThanZero).To(isPositive)
 // valid Rule values. There is no runtime behavior to exercise yet — the
 // preprocessor consumes these declarations.
 func TestBuilderCompiles(t *testing.T) {
-	var r1 infer.Rule = infer.From(isSmallPositive).To(isPositive)
-	var r2 infer.Rule = infer.From(isEven).Given(isGreaterThanZero).To(isPositive)
+	r1 := infer.From(isSmallPositive).To(isPositive)
+	r2 := infer.From(isEven).Given(isGreaterThanZero).To(isPositive)
 	_ = r1
 	_ = r2
 }
