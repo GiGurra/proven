@@ -26,9 +26,11 @@ func Normalize(x int) int {
 // Nested calls thread postconditions into the argument position:
 //   target(Normalize(x))  // isPositive carries through
 
-// proven.Returns turns the postcondition into a verified contract
-// declared at the site — use it at API boundaries where the claim
-// should be the function's signature, not an emergent property:
+// proven.Returns pins the postcondition to the declaration site.
+// The fact already flows to callers without it — what Returns adds
+// is compile-time verification HERE, so a future edit that drops
+// the proof from the body breaks this function's build instead of
+// silently withdrawing the claim at every caller:
 func Clamp(x int) int {
     proven.That(x, isPositive)
     return proven.Returns(x, isPositive)
@@ -126,7 +128,7 @@ func caller(x int) {
 }
 ```
 
-A return that yields a literal or a computed expression contributes no facts, so a function with mixed return shapes advertises only what holds at every return site. To make the postcondition a **declared, compiler-verified contract** at the site — for API-boundary functions where the claim belongs in the signature — wrap the return in `proven.Returns`.
+A return that yields a literal or a computed expression contributes no facts, so a function with mixed return shapes advertises only what holds at every return site. `proven.Returns(v, preds...)` doesn't create the postcondition — the fact already flows from the body — it **pins** the claim at the declaration site: the preprocessor verifies each predicate is already a fact on `v` at the return point, so a future edit that drops the proof breaks this function's own build instead of silently withdrawing the postcondition at every caller. Use it at API boundaries and anywhere a stable output contract matters more than brevity.
 
 </details>
 

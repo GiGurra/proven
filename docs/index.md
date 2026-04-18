@@ -20,8 +20,11 @@ func Normalize(x int) int {
     return x // callers get isPositive as a fact on the result
 }
 
-// proven.Returns makes the postcondition a compiler-verified contract
-// declared at the site — use it at API boundaries:
+// proven.Returns pins the postcondition to the declaration site.
+// The fact already flows to callers without it — what Returns adds
+// is compile-time verification HERE, so a future edit that drops
+// the proof from the body breaks this function's build instead of
+// silently withdrawing the claim at every caller:
 func Clamp(x int) int {
     proven.That(x, isPositive)
     return proven.Returns(x, isPositive)
