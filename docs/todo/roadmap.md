@@ -82,17 +82,50 @@ func handler(s Session) {
 
 Out of scope for Phase 10: pointer vs value receiver equivalence (treating `Session.IsValid` and `(*Session).IsValid` as the same predicate — v2 if ever), generic methods (deferred with generic predicate support generally).
 
+### Phase 11a — Inline combinators
+
+**Goal.** Accept `proven.And` / `proven.Or` / `proven.Not` calls as predicate arguments at obligation and fact sites, where every leaf of the combinator tree is a named predicate the scanner already resolves. Ships independently of full lambda support because the structural-identity case is strictly simpler than the general lambda-identity question.
+
+Current state: strict mode rejects `proven.That(v, proven.And(isPositive, lessThan100))` because `resolvePredicate` only recognizes `*ast.Ident` and package-qualified `*ast.SelectorExpr`. The workaround today is a package-level `var p = proven.And(isPositive, lessThan100)` binding — which works, but introduces a name for a one-shot composition the user did not want to name. Phase 11a closes that gap.
+
+Design threads the phase has to cover:
+
+- **Structural identity.** A combinator call's identity is `{Op, Args...}` where each `Args[i]` is either a `Predicate{Pkg, Name}` or (recursively) another combinator identity. This is a tree shape the preprocessor can hash or canonicalize. Two syntactically-different-but-structurally-equal combinator trees should discharge each other (e.g. `And(a, b)` at a call site discharging an obligation of `And(a, b)` declared elsewhere) — AND-commutativity / OR-commutativity is a design choice: match Go semantics strictly (left-to-right, no reordering) or normalize the tree on ingest.
+- **Scanner changes.** `resolvePredicate` grows a case for `*ast.CallExpr` whose Fun is `proven.And` / `proven.Or` / `proven.Not`. Each argument recurses through the same resolver; if any leaf fails to resolve, the whole expression fails to resolve and strict mode rejects the enclosing call (same behavior as today, just nested). The returned type shifts from a flat `Predicate` to a `PredicateExpr` sum of `PredicateExpr{Leaf *Predicate, Op string, Args []PredicateExpr}` — or a simpler flattening if we commit to normalizing `And`/`Or` into n-ary form on ingest.
+- **Analyzer discharge.** A fact `Fact{Pred: And(a, b), Var: x}` established at a guard must discharge an obligation demanding `And(a, b)`. Options: (a) store combinator facts as-is and match structurally at discharge time, or (b) decompose a successful `if And(a, b)(x)` guard into two facts `Fact{a, x}` + `Fact{b, x}` and let existing leaf-level discharge handle it (only sound for `And`, not `Or` — `Or` is genuinely harder and needs a disjunctive fact representation). Starting with (b) for `And` + `Not` and deferring `Or`-as-obligation to v2 is the likely pragmatic cut.
+- **Sidecar.** Cross-package discharge needs the combinator shape in JSON. The `Predicate` slot in `PackageSummary.Funcs[].Params[]` becomes a `PredicateExpr`. Straightforward schema extension; breaks sidecar compatibility with Phase 6 output, so bump the sidecar version.
+- **Rewriter.** No change — erasure is still by span, and the combinator call inside `proven.That(...)` is part of the wrapper span being blanked.
+- **infer rules.** `infer.From(...).To(...)` slots currently take named predicates only. Once Phase 11a lands at the scanner, `From(proven.And(a, b))` falls out naturally — the existing strict-mode error "argument to infer.From must be a named function" would need to recognize combinator trees too.
+
+Expected shape after the phase:
+
+```go
+func isPositive(x int) bool { return x > 0 }
+func lessThan100(x int) bool { return x < 100 }
+
+func setPercent(p int) {
+    proven.That(p, proven.And(isPositive, lessThan100))
+}
+
+func caller(p int) {
+    if isPositive(p) && lessThan100(p) { // decomposed discharge: two leaf facts cover the And
+        setPercent(p)
+    }
+}
+```
+
+Out of scope for Phase 11a: genuine closures with captured state (Phase 11), `Or` at the obligation side (deferred pending disjunctive-fact design), combinator-returning user functions (`var p = makePred(x)` — indistinguishable from a lambda from the scanner's perspective).
+
 ### Phase 11 — Closures / lambdas as predicates
 
-**Goal.** Accept function literals (and combinator calls that produce unnamed `func(T) bool` values) as predicate arguments, without silently weakening the contract.
+**Goal.** Accept function literals as predicate arguments, without silently weakening the contract.
 
-Current state: function literals and inline combinator calls are rejected at build time because they have no stable package + name identity, which means the preprocessor cannot correlate a lambda used as an obligation in one place with the same-or-compatible lambda used as a fact in another. Phase 11 asks: can we give lambdas a useful compile-time identity that enables same-file or same-package discharge?
+Current state: function literals are rejected at build time because they have no stable package + name identity, which means the preprocessor cannot correlate a lambda used as an obligation in one place with the same-or-compatible lambda used as a fact in another. Phase 11 asks: can we give lambdas a useful compile-time identity that enables same-file or same-package discharge?
 
-Three sub-questions the design has to close:
+Two sub-questions the design has to close (inline combinators are split out into Phase 11a above):
 
 - **Identity.** A lambda has no name. Possible bases: the lambda's source text (after gofmt normalization), its AST hash, its syntactic position (`file:offset`), or a content-hash of its body. Each has tradeoffs: source-text and AST-hash give structural equality (two identical lambdas in different files are "the same"), position-based gives per-definition identity (different lambdas at different positions are distinct even when textually identical). Which matches user intent?
 - **Scope of use.** Even with identity, a lambda defined in file A can't realistically be discharged by a fact established in file B unless both reference the same declared identifier — so the practical scope is "lambdas used multiple times within one file, or assigned to a package-scope var before use." The latter is already the recommended workaround today (`var p = func(x int) bool { ... }; proven.That(v, p)`), which means it already works — a named var binding a function literal passes the Ident resolver. The real gap is single-use inline `proven.That(v, func(x int) bool { ... })` which the preprocessor never sees at any other site.
-- **Inline combinators.** `proven.That(v, proven.And(a, b))` is the common case behind the lambda question. The combinator's result has no name, but its STRUCTURE is known: it is the AND of `a` and `b`, both of which ARE resolvable named predicates. A narrow rule — "accept combinator calls whose arguments are all named" — would resolve this without reintroducing silent-drop for genuine lambdas. Worth considering as a Phase 11a that ships before full lambda support.
 
 Out of scope for Phase 11: closures that capture enclosing variables (their bodies reference non-parameter state; cross-call identity is essentially impossible), lambdas that change over time (redefined in different builds — their identity would shift, breaking cache coherence).
 
