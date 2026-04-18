@@ -1,6 +1,6 @@
 # proven
 
-Compile-time contracts for Go, with runtime fallback. A `-toolexec` preprocessor proves preconditions at build time; when it can't, they degrade to runtime checks.
+Compile-time contracts for Go, enforced via a `-toolexec` preprocessor. Declare what every call site must prove; the build fails loudly when it can't.
 
 ## What is this?
 
@@ -23,7 +23,15 @@ The function signature stays pure Go — no wrapper types, no type parameters, n
 
 **Under the preprocessor**, call sites are discharged by flow-sensitive analysis (literals, preceding checks, early-return guards, postconditions on return values). Discharged calls are erased; undischarged calls fail the build with a diagnostic.
 
-**Wiring verification in tests.** The sibling package `pkg/proventest` supplies the link symbol for test binaries and exposes `proventest.WithChecks(fn)`. Inside that call, `proven.That` / `proven.Returns` blocks execute at runtime, so a failing predicate panics — letting you assert that the right predicate is actually wired to the right parameter.
+**Wiring verification in tests.** The sibling package `pkg/proventest` supplies the link symbol for test binaries and exposes `proventest.AssertFails(t, pred, fn)` — it runs `fn` with proven checks temporarily executing at runtime and asserts that `pred` (and no other predicate) is the one that fires:
+
+```go
+proventest.AssertFails(t, isPositive, func() {
+    Transfer(-5, "hi", "USD") // isPositive must reject -5
+})
+```
+
+Catches the case where a precondition silently stops applying to its intended parameter.
 
 The goal: **stop forgetting to validate incoming data**, and stop repeating the same validation at every layer once you have.
 
