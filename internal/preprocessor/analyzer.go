@@ -567,15 +567,19 @@ func (a *analyzer) verifyProvenReturns(call *ast.CallExpr) {
 		return
 	}
 	for _, arg := range call.Args[1:] {
-		pred, ok := resolvePredicate(arg, a.imp, a.summary.ImportPath)
+		// Pass nil diags — the scanner's recordReturns pass has
+		// already reported any unresolvable predicate, and we do
+		// not want to double the error. resolveAndFlat here is
+		// purely for the leaf expansion (so proven.Returns(v,
+		// proven.And(a, b)) verifies each leaf on v).
+		leaves, ok := resolveAndFlat(arg, a.imp, a.summary.ImportPath, nil, nil, "")
 		if !ok {
-			// The unresolvable-predicate diagnostic is already
-			// emitted by the scanner's recordReturns pass; skip
-			// here to avoid doubling the error.
 			continue
 		}
-		if !a.discharged(pred, valueID.Name) {
-			reportUnprovenReturns(a.diags, a.fset, call, pred, valueID.Name, a.summary.ImportPath)
+		for _, pred := range leaves {
+			if !a.discharged(pred, valueID.Name) {
+				reportUnprovenReturns(a.diags, a.fset, call, pred, valueID.Name, a.summary.ImportPath)
+			}
 		}
 	}
 }
@@ -1190,18 +1194,22 @@ func (a *analyzer) trustCallPredicates(call *ast.CallExpr) []Predicate {
 // arguments are reported via the analyzer's diagnostic channel
 // (when non-nil) using the caller-supplied role label so the
 // message identifies which site is the problem.
+//
+// Inline proven.And decomposes here too: prove.Must(raw,
+// proven.And(a, b)) plants both leaf facts a and b on the LHS of
+// the assignment, same as prove.Must(raw, a, b). Nested And
+// flattens fully.
 func (a *analyzer) resolveTrailingPredicates(call *ast.CallExpr, role string) []Predicate {
 	if len(call.Args) < 2 {
 		return nil
 	}
 	var out []Predicate
 	for _, arg := range call.Args[1:] {
-		p, ok := resolvePredicate(arg, a.imp, a.summary.ImportPath)
+		leaves, ok := resolveAndFlat(arg, a.imp, a.summary.ImportPath, a.fset, a.diags, role)
 		if !ok {
-			reportBadPredicate(a.diags, a.fset, arg, role)
 			continue
 		}
-		out = append(out, p)
+		out = append(out, leaves...)
 	}
 	return out
 }
