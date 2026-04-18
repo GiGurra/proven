@@ -108,7 +108,7 @@ The three packages share the preprocessor infrastructure (toolexec entry, per-pa
 | Package | Status |
 |---------|--------|
 | `proven` | Runtime stubs implemented in `pkg/proven/`. Preprocessor is future work. |
-| `prove`  | Not yet implemented. This document captures the intent. |
+| `prove`  | `That(v, preds...) (T, error)` and `Must(v, preds...) T` implemented in `pkg/prove/`. Preprocessor consumption (treating successful `That` / `Must` results as proven downstream) pending. |
 | `infer`  | Inference rules (`From(p).To(q)` / `From(p).Given(c).To(q)`) implemented as runtime stubs in `pkg/infer/`. Compile-time evaluation (`infer.Const`) still future. Preprocessor consumption pending. |
 
 When the preprocessor lands, the three packages become siblings under `pkg/`, each with their runtime stubs plus the shared preprocessor pass-hooks.
