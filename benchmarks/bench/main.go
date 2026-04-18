@@ -36,7 +36,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "bench: tempdir:", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(binDir)
+	defer func() { _ = os.RemoveAll(binDir) }()
 	binary := filepath.Join(binDir, "proven")
 	if out, err := runIn(repoRoot, nil, "go", "build", "-o", binary, "./cmd/proven"); err != nil {
 		fmt.Fprintln(os.Stderr, "bench: build proven:", err)
@@ -56,7 +56,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "bench: cache dir:", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(cache)
+	defer func() { _ = os.RemoveAll(cache) }()
 
 	env := []string{"GOCACHE=" + cache}
 

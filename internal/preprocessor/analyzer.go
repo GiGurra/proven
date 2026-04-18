@@ -542,6 +542,19 @@ func (a *analyzer) verifyProvenReturns(call *ast.CallExpr) {
 	if len(call.Args) < 2 {
 		return
 	}
+	// Test files (foo_test.go) legitimately need to exercise
+	// proven.Returns with deliberately-bad inputs to verify
+	// runtime-check wiring through proventest.AssertFails and
+	// friends. Strict site verification in these files would make
+	// such wiring tests impossible to write. The rest of strict
+	// mode (unresolvable-predicate rejection, etc.) still applies
+	// in test files — that is about identity shape, not runtime
+	// values.
+	if a.fset != nil {
+		if pos := a.fset.Position(call.Pos()); isTestFile(pos.Filename) {
+			return
+		}
+	}
 	valueID, ok := call.Args[0].(*ast.Ident)
 	if !ok {
 		reportBadReturnsValue(a.diags, a.fset, call.Args[0], "literal or expression")
@@ -564,6 +577,24 @@ func (a *analyzer) verifyProvenReturns(call *ast.CallExpr) {
 			reportUnprovenReturns(a.diags, a.fset, call, pred, valueID.Name, a.summary.ImportPath)
 		}
 	}
+}
+
+// isTestFile reports whether filename is a Go test file, identified
+// by the `_test.go` suffix Go's own toolchain uses. Path prefix is
+// irrelevant — we inspect only the base name.
+func isTestFile(filename string) bool {
+	if filename == "" {
+		return false
+	}
+	base := filename
+	for i := len(base) - 1; i >= 0; i-- {
+		if base[i] == '/' || base[i] == '\\' {
+			base = base[i+1:]
+			break
+		}
+	}
+	const suffix = "_test.go"
+	return len(base) >= len(suffix) && base[len(base)-len(suffix):] == suffix
 }
 
 // reportBadReturnsValue emits a diagnostic when the value argument

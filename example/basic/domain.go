@@ -4,7 +4,10 @@
 // Go functions.
 package basic
 
-import "github.com/GiGurra/proven/pkg/proven"
+import (
+	"github.com/GiGurra/proven/pkg/proven"
+	"github.com/GiGurra/proven/pkg/trust"
+)
 
 // Predicates: plain Go, nothing special.
 
@@ -42,10 +45,15 @@ func SetPercent(p int) {
 	_ = p
 }
 
-// FindUserID returns a positive user ID. Returns declares the
-// postcondition; callers can use the returned value wherever isPositive
-// is required without re-proving.
+// FindUserID returns a positive user ID. The returned value is a
+// literal the analyzer cannot reason about, so we use trust.Returns
+// — the "trust me" variant of proven.Returns that asserts the
+// postcondition on the programmer's word and advertises it to every
+// caller (callers still get isPositive as a fact on the returned
+// value without re-proving). For a value the analyzer can prove
+// locally (guarded, prove-validated, or flowing from a seeded
+// precondition), use proven.Returns instead.
 func FindUserID(name string) int {
 	_ = name
-	return proven.Returns(42, isPositive)
+	return trust.Returns(42, isPositive)
 }
