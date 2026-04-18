@@ -85,9 +85,47 @@ Callers of a function with `proven.Returns(v, isPositive)` as its return automat
 </details>
 
 <details>
-<summary><strong>Discharge patterns — how callers prove their obligations</strong></summary>
+<summary><strong>Discharge patterns — how facts get established, and what happens when they aren't</strong></summary>
 
-The preprocessor recognizes five fact sources in caller code:
+**The core insight:** you don't use a special "proof" API to establish a fact. The preprocessor watches the caller's ordinary control flow and treats any check it can see as a fact in the then-branch. A plain `if isPositive(x) { ... }` and a boundary-validating `prove.That(raw, isPositive)` produce **the same fact** in the analyzer — the difference is only where the value came from and whether you wanted an error return.
+
+```go
+// Path A — regular predicate call in a guard.
+if isPositive(x) {
+    Transfer(x, "hi")   // discharged: isPositive(x) is a fact in the then-branch
+}
+
+// Path B — prove.That for boundary-validated values, same resulting fact.
+v, err := prove.That(raw, isPositive)
+if err != nil {
+    return err
+}
+Transfer(v, "hi")       // discharged: isPositive(v) is a fact on the err==nil side
+```
+
+Both discharge `proven.That(amount, isPositive)` inside `Transfer` identically. Pick whichever matches the shape of the surrounding code.
+
+**What a missed proof looks like.** If you drop the guard, the build fails:
+
+```go
+func Transfer(amount int, note string) error {
+    proven.That(amount, isPositive)
+    return nil
+}
+
+func main() {
+    x := readUserInput()
+    Transfer(x, "hi")   // no guard — build fails
+}
+```
+
+```
+main.go:NN:CC: proven: undischarged predicate isPositive on parameter 0 of Transfer
+```
+
+Same `file:line:col:` format Go's own compiler uses, so your editor click-through works. The diagnostic names the missing predicate, which parameter it's on, and which callee needed it — so the fix is either an explicit guard, a `prove.That` at the boundary, a `proven.Returns` postcondition from the producer, or a `trust.That` injection if you've validated it by a mechanism the analyzer can't see.
+
+**The five fact sources** the preprocessor recognizes in caller code:
 
 ```go
 // 1. Preceding predicate check.
@@ -116,7 +154,7 @@ if err != nil { return err }
 Target(v)            // isPositive(v) is a fact on the err == nil side
 ```
 
-Obligations are discharged by direct fact match, by backward-chaining through declared inference rules, or by a `trust.That` injection.
+Obligations are discharged by direct fact match, by backward-chaining through declared inference rules, or by a `trust.That` injection. The proof rides along as far as you pass the value: each function along the chain declares the precondition it needs as its own `proven.That`, which — once discharged by the caller — becomes a fact inside that function's body for every downstream call that also needs it.
 
 </details>
 
@@ -157,14 +195,24 @@ The preprocessor erases `proven.That` at build as usual. Inside tests you can op
 ```go
 import "github.com/GiGurra/proven/pkg/proventest"
 
+// Bad input: the declared predicate must reject it.
 func TestTransfer_RejectsNegativeAmount(t *testing.T) {
     proventest.AssertFails(t, isPositive, func() {
         Transfer(-5, "hi") // isPositive must reject -5
     })
 }
+
+// Good input: no declared predicate should fire.
+func TestTransfer_AcceptsValidInput(t *testing.T) {
+    proventest.AssertPasses(t, func() {
+        Transfer(5, "hi") // every declared contract along the call chain accepts
+    })
+}
 ```
 
-If someone later drops `proven.That(amount, isPositive)` from `Transfer`, this test fails. If they replace `isPositive` with a weaker predicate, the test fails with `expected isPositive to fire, got isNonNegative`. Production still runs at zero overhead; the runtime mode is strictly additive.
+`AssertFails` pins "this predicate must fire on this input" — if someone drops `proven.That(amount, isPositive)` or weakens it, the test fails with `expected isPositive to fire, got isNonNegative`. `AssertPasses` is its symmetric counterpart — "every declared contract accepts this input" — so you can lock in known-valid inputs and catch a refactor that accidentally tightens a predicate. Production still runs at zero overhead; the runtime mode is strictly additive.
+
+There's also `proventest.AssertAnyFailure` when only the existence of a violation matters, and the raw `proventest.WithChecks(fn)` primitive if you want to compose something custom.
 
 </details>
 
@@ -255,7 +303,7 @@ Every existing discharge pattern works unchanged. Two deferred alternatives (cur
 
 5. **Link-time IDE gate.** `proven.That` / `proven.Returns` wrap their checks in `atCompileTime(func() { ... })`, where `atCompileTime` is declared via `//go:linkname` to the external symbol `_proven_atCompileTime`. `gopls` and `go vet` see plain Go. But `go build` / `go test` on a main or test target refuses to link without the preprocessor — which supplies the missing symbol. Forgetting the preprocessor is a loud link failure, never a silent loss of static checking.
 
-6. **Test-time runtime mode.** `pkg/proventest` supplies the symbol for test binaries. By default it's a no-op (matches production). Inside `proventest.WithChecks(fn)` or `AssertFails(t, pred, fn)`, each `atCompileTime` block actually executes and a failing predicate panics with a structured `proven.Violation`.
+6. **Test-time runtime mode.** `pkg/proventest` supplies the symbol for test binaries. By default it's a no-op (matches production). Inside `proventest.WithChecks(fn)`, `AssertFails(t, pred, fn)`, or `AssertPasses(t, fn)`, each `atCompileTime` block actually executes and a failing predicate panics with a structured `proven.Violation`.
 
 Full design in [`docs/design.md`](docs/design.md).
 
@@ -316,7 +364,7 @@ GOCACHE="$HOME/.cache/proven-build" go clean -cache
 | `pkg/trust` | Local fact injection without runtime check: `That(v, preds) T`. |
 | `pkg/infer` | Inference-rule builder: `From(p).[Given(c).]To(q)`. |
 | `pkg/infertest` | Property-test inference rules: `Verify(t, rule, samples...)`, `VerifyApplies`. |
-| `pkg/proventest` | Test-time linker stub + `WithChecks` / `AssertFails` / `AssertAnyFailure`. |
+| `pkg/proventest` | Test-time linker stub + `WithChecks` / `AssertFails` / `AssertPasses` / `AssertAnyFailure`. |
 | `cmd/proven` | Toolexec preprocessor binary. |
 
 </details>
