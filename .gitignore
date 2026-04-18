@@ -23,6 +23,9 @@ vendor/
 /dist/
 /bin/
 
+# mkdocs generated site
+/site/
+
 # Env files
 .env
 .env.local

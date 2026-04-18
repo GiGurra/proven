@@ -1,0 +1,51 @@
+site_name: Proven
+site_url: https://gigurra.github.io/proven/
+site_description: Compile-time contracts for Go, enforced via a -toolexec preprocessor
+repo_url: https://github.com/GiGurra/proven
+repo_name: GiGurra/proven
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.sections
+    - content.code.copy
+    - search.highlight
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Design: design.md
+  - Companion Packages: companion-packages.md
+  - Relations Between Values: relations.md
+  - Compile-time Evaluation (out of scope): comptime.md
+  - Roadmap: todo/roadmap.md
+  - Historical Notes:
+    - Original Concept: concept.md
+    - Go Language Findings: go-language-findings.md
+    - IDE Integration Analysis: ide-integration.md
+    - Parameter Constraint Syntax (superseded): parameter-constraint-syntax.md
+    - Subsumption (superseded): subsumption.md
