@@ -1,1 +1,1 @@
-proven: cannot prove isPositive on parameter 0 of target
+proven: cannot prove isPositive on 42

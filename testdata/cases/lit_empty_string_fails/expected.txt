@@ -1,1 +1,1 @@
-proven: cannot prove proven.NonEmpty on parameter 0 of target
+proven: cannot prove proven.NonEmpty on ""

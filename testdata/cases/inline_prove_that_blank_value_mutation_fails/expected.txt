@@ -1,1 +1,1 @@
-proven: cannot prove proven.NonNil on parameter 0 of needsNonNil
+proven: cannot prove proven.NonNil on holder.Value

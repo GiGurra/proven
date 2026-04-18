@@ -1,1 +1,1 @@
-cannot prove isPositive on parameter 0 of target
+cannot prove isPositive on x

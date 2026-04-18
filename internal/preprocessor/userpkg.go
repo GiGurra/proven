@@ -402,14 +402,15 @@ func dischargeDiagnostics(d CallDischarge, fset *token.FileSet, currentPkg strin
 	}
 	var out []Diagnostic
 	for _, p := range d.Params {
+		subject := argLabel(p)
 		for _, missing := range p.Missing {
 			out = append(out, Diagnostic{
 				File: pos.Filename,
 				Line: pos.Line,
 				Col:  pos.Column,
 				Msg: fmt.Sprintf(
-					"proven: cannot prove %s on parameter %d of %s",
-					predicateLabel(missing, currentPkg), p.ParamIdx, callee,
+					"proven: cannot prove %s on %s (parameter %d of %s)",
+					predicateLabel(missing, currentPkg), subject, p.ParamIdx, callee,
 				),
 			})
 		}
@@ -419,13 +420,30 @@ func dischargeDiagnostics(d CallDischarge, fset *token.FileSet, currentPkg strin
 				Line: pos.Line,
 				Col:  pos.Column,
 				Msg: fmt.Sprintf(
-					"proven: cannot prove proven.Or(%s) on parameter %d of %s",
-					altsLabelList(alts, currentPkg), p.ParamIdx, callee,
+					"proven: cannot prove proven.Or(%s) on %s (parameter %d of %s)",
+					altsLabelList(alts, currentPkg), subject, p.ParamIdx, callee,
 				),
 			})
 		}
 	}
 	return out
+}
+
+// argLabel picks the user-facing label for a parameter's argument:
+// prefer the rendered source expression when available (what the
+// user actually wrote), fall back to the canonical key (tracked
+// identifier / selector path), and finally use a human-readable
+// placeholder when neither is available — the discharge check then
+// still produces a meaningful message even for non-trackable
+// subjects like arithmetic or inline function-call arguments.
+func argLabel(p ParamDischarge) string {
+	if p.ArgExpr != "" {
+		return p.ArgExpr
+	}
+	if p.ArgName != "" && !strings.HasPrefix(p.ArgName, "$arg") {
+		return p.ArgName
+	}
+	return "argument"
 }
 
 // altsLabelList renders an Or-alt list: comma-separated predicate

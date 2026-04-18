@@ -38,13 +38,32 @@ package preprocessor
 //      prove.Must produces the fact unconditionally at its call site.
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"slices"
 	"strings"
 )
+
+// exprSource renders expr back into its source-level text via
+// go/printer. Used by diagnostics so the user sees the actual
+// argument expression ("holder.Value", "5", "foo(x)") instead of
+// the analyzer's internal canonical / virtual key. fset must be the
+// FileSet that owns expr's positions. An unrenderable expression (a
+// nil input, or a go/printer error) returns "".
+func exprSource(fset *token.FileSet, expr ast.Expr) string {
+	if fset == nil || expr == nil {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, fset, expr); err != nil {
+		return ""
+	}
+	return buf.String()
+}
 
 // proveImportPath is the runtime-boundary-validation package
 // whose successful calls the analyzer treats as fact sources.
@@ -134,9 +153,17 @@ func (c CallDischarge) Undischarged() bool {
 // matching Or-fact was planted. Surfaced separately from the leaf
 // lists so diagnostics can render the whole Or at once instead of
 // emitting one complaint per disjunct.
+//
+// ArgName is the canonical fact-subject key used internally by the
+// resolver (a bare identifier, a selector-path, or a synthetic
+// "$argN" for virtually-planted literal / nested-call arguments).
+// ArgExpr is the rendered source form of the actual call-site
+// argument — used in diagnostics so users see "holder.Value" /
+// "5" / "foo(x)" at the error line, not the internal key.
 type ParamDischarge struct {
 	ParamIdx    int
 	ArgName     string
+	ArgExpr     string
 	Required    []Predicate
 	Missing     []Predicate
 	RequiredOrs [][]Predicate
@@ -1070,6 +1097,7 @@ func (a *analyzer) recordCallDischarge(call *ast.CallExpr) {
 		pd := ParamDischarge{
 			ParamIdx: idx,
 			ArgName:  argName,
+			ArgExpr:  exprSource(a.fset, call.Args[idx]),
 			Missing:  missing,
 		}
 		if len(required) > 0 {
