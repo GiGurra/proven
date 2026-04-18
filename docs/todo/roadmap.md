@@ -82,39 +82,13 @@ func handler(s Session) {
 
 Out of scope for Phase 10: pointer vs value receiver equivalence (treating `Session.IsValid` and `(*Session).IsValid` as the same predicate — v2 if ever), generic methods (deferred with generic predicate support generally).
 
-### Phase 11a — Inline combinators
+### Phase 11a — Inline combinators (done)
 
-**Goal.** Accept `proven.And` / `proven.Or` / `proven.Not` calls as predicate arguments at obligation and fact sites, where every leaf of the combinator tree is a named predicate the scanner already resolves. Ships independently of full lambda support because the structural-identity case is strictly simpler than the general lambda-identity question.
+**Status:** shipped. Inline `proven.And(a, b)` at obligation sites (`proven.That` / `proven.Returns`, `prove.That` / `prove.Must`, `trust.That` / `trust.Returns` via `recordReturns`, and every `infer.From/Given/To` slot) is now accepted. The scanner's `resolveAndFlat` walks combinator trees recursively, flattens nested `And` fully, and emits one leaf predicate per tree leaf — so `proven.That(x, proven.And(a, b))` is stored as the two-leaf obligation list `[a, b]`, exactly as if the user had written `proven.That(x, a, b)`. This means the analyzer, sidecar, and rewriter needed zero changes: they already handle leaf obligations, and the And is gone before they see it.
 
-Current state: strict mode rejects `proven.That(v, proven.And(isPositive, lessThan100))` because `resolvePredicate` only recognizes `*ast.Ident` and package-qualified `*ast.SelectorExpr`. The workaround today is a package-level `var p = proven.And(isPositive, lessThan100)` binding — which works, but introduces a name for a one-shot composition the user did not want to name. Phase 11a closes that gap.
+`proven.Or` and `proven.Not` at obligation sites are deferred — they would need disjunctive- and negation-fact representations the analyzer does not carry — and strict mode rejects them with a diagnostic pointing users at inference rules as the supported route for disjunction. Fixtures under `testdata/cases/`: `predicate_inline_and_ok`, `predicate_inline_and_nested_ok`, `predicate_inline_and_missing_leaf_fails`, `predicate_inline_or_fails`, `infer_from_inline_and_ok`.
 
-Design threads the phase has to cover:
-
-- **Structural identity.** A combinator call's identity is `{Op, Args...}` where each `Args[i]` is either a `Predicate{Pkg, Name}` or (recursively) another combinator identity. This is a tree shape the preprocessor can hash or canonicalize. Two syntactically-different-but-structurally-equal combinator trees should discharge each other (e.g. `And(a, b)` at a call site discharging an obligation of `And(a, b)` declared elsewhere) — AND-commutativity / OR-commutativity is a design choice: match Go semantics strictly (left-to-right, no reordering) or normalize the tree on ingest.
-- **Scanner changes.** `resolvePredicate` grows a case for `*ast.CallExpr` whose Fun is `proven.And` / `proven.Or` / `proven.Not`. Each argument recurses through the same resolver; if any leaf fails to resolve, the whole expression fails to resolve and strict mode rejects the enclosing call (same behavior as today, just nested). The returned type shifts from a flat `Predicate` to a `PredicateExpr` sum of `PredicateExpr{Leaf *Predicate, Op string, Args []PredicateExpr}` — or a simpler flattening if we commit to normalizing `And`/`Or` into n-ary form on ingest.
-- **Analyzer discharge.** A fact `Fact{Pred: And(a, b), Var: x}` established at a guard must discharge an obligation demanding `And(a, b)`. Options: (a) store combinator facts as-is and match structurally at discharge time, or (b) decompose a successful `if And(a, b)(x)` guard into two facts `Fact{a, x}` + `Fact{b, x}` and let existing leaf-level discharge handle it (only sound for `And`, not `Or` — `Or` is genuinely harder and needs a disjunctive fact representation). Starting with (b) for `And` + `Not` and deferring `Or`-as-obligation to v2 is the likely pragmatic cut.
-- **Sidecar.** Cross-package discharge needs the combinator shape in JSON. The `Predicate` slot in `PackageSummary.Funcs[].Params[]` becomes a `PredicateExpr`. Straightforward schema extension; breaks sidecar compatibility with Phase 6 output, so bump the sidecar version.
-- **Rewriter.** No change — erasure is still by span, and the combinator call inside `proven.That(...)` is part of the wrapper span being blanked.
-- **infer rules.** `infer.From(...).To(...)` slots are already variadic and AND-compose named predicates. Once Phase 11a lands at the scanner, `From(proven.And(a, b))` — where the argument is itself a combinator tree — falls out naturally: the strict-mode error "argument to infer.From must be a named function" would need to recognize combinator trees too, same as the proven.That / prove.That sites.
-
-Expected shape after the phase:
-
-```go
-func isPositive(x int) bool { return x > 0 }
-func lessThan100(x int) bool { return x < 100 }
-
-func setPercent(p int) {
-    proven.That(p, proven.And(isPositive, lessThan100))
-}
-
-func caller(p int) {
-    if isPositive(p) && lessThan100(p) { // decomposed discharge: two leaf facts cover the And
-        setPercent(p)
-    }
-}
-```
-
-Out of scope for Phase 11a: genuine closures with captured state (Phase 11), `Or` at the obligation side (deferred pending disjunctive-fact design), combinator-returning user functions (`var p = makePred(x)` — indistinguishable from a lambda from the scanner's perspective).
+Not done (explicitly): structural `And` at FACT sites (e.g. a callee advertising `proven.Returns(v, proven.And(a, b))` — this IS accepted by the current scanner because the fact side goes through the same `recordReturns` path and flattens likewise; verified by the fixtures above). `proven.Or` / `proven.Not` at obligation sites remain v2. A user-function returning an anonymous predicate (`var p = makePred(x)` or inline `proven.That(v, makePred(x))`) is still rejected — the scanner cannot resolve such a call to a stable leaf identity, so strict mode catches it.
 
 ### Phase 11 — Closures / lambdas as predicates
 

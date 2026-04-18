@@ -208,17 +208,18 @@ func Plain(x int) int { return x * 2 }
 }
 
 func TestScan_SkipsUnresolvedPredicateExpressions(t *testing.T) {
-	// When the scanner is called with diags == nil (stand-alone
-	// API path, as scanFromString does below), an unresolvable
-	// predicate expression — combinator call, function literal,
-	// arbitrary expression — is silently dropped from the summary.
-	// The production toolexec path passes a non-nil diags and
-	// turns the same shape into a build-failing diagnostic; see
-	// testdata/cases/predicate_lambda_fails and
-	// predicate_inline_combinator_fails for that path. This test
-	// locks in the lenient-mode behavior specifically so the
-	// stand-alone API can keep scanning partially-broken sources
-	// without panicking.
+	// When the scanner is called with diags == nil (stand-alone API
+	// path, as scanFromString does below), an unresolvable predicate
+	// expression — a function literal or other unnamed value — is
+	// silently dropped from the summary. The production toolexec
+	// path passes a non-nil diags and turns the same shape into a
+	// build-failing diagnostic; see testdata/cases/predicate_lambda_fails.
+	//
+	// proven.And is NOT dropped: since Phase 11a the scanner
+	// decomposes it into its leaf predicates on ingest, so
+	// proven.That(amount, proven.And(isPositive, isSmall)) is
+	// equivalent to proven.That(amount, isPositive, isSmall). The
+	// test covers both behaviors on the same source.
 	src := `package ex
 
 import "github.com/GiGurra/proven/pkg/proven"
@@ -234,8 +235,13 @@ func Do(amount int) {
 `
 	sum := scanFromString(t, "example.com/ex", src)
 	preds := sum.Funcs["Do"].ParamPreds[0]
-	// Only the bare ident isPositive should be recorded.
-	want := []Predicate{{Pkg: "example.com/ex", Name: "isPositive"}}
+	// proven.And decomposes to {isPositive, isSmall}; the lambda is
+	// dropped; the bare ident contributes isPositive a second time.
+	want := []Predicate{
+		{Pkg: "example.com/ex", Name: "isPositive"},
+		{Pkg: "example.com/ex", Name: "isSmall"},
+		{Pkg: "example.com/ex", Name: "isPositive"},
+	}
 	if !reflect.DeepEqual(preds, want) {
 		t.Errorf("got %v, want %v", preds, want)
 	}

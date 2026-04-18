@@ -178,7 +178,11 @@ Target(v)                        // isPositive(v) is a fact
 
 Obligations are discharged by direct fact match, by backward-chaining through declared inference rules, or by a `trust.That` injection. The proof rides along as far as you pass the value: each function along the chain declares the precondition it needs as its own `proven.That`, which — once discharged by the caller — becomes a fact inside that function's body for every downstream call that also needs it.
 
-**Predicates must be named.** Every predicate argument to `proven.That`, `proven.Returns`, `prove.That`, `prove.Must`, `trust.That`, and each slot in `infer.From(...).[Given(...).]To(...)` must be a named function or a `pkg.Name` selector. Function literals (`proven.That(x, func(n int) bool { ... })`) and inline combinator calls (`proven.That(x, proven.And(a, b))`) fail the build with a diagnostic pointing at the offending expression — declare them as package-level vars and reference the name. This is the "no silent bypass" principle: a predicate the scanner cannot track by identity cannot be used for cross-package discharge, and accepting it would silently weaken the contract.
+**Predicates must be named — with one structural exception for `proven.And`.** Every predicate argument to `proven.That`, `proven.Returns`, `prove.That`, `prove.Must`, `trust.That`, and each slot in `infer.From(...).[Given(...).]To(...)` must ultimately reduce to named functions or `pkg.Name` selectors. Function literals (`proven.That(x, func(n int) bool { ... })`) fail the build with a diagnostic pointing at the offending expression — declare them as package-level vars and reference the name.
+
+Inline `proven.And(a, b)` IS accepted at obligation sites: the scanner decomposes it into its leaf predicates on ingest, so `proven.That(x, proven.And(a, b))` is equivalent to `proven.That(x, a, b)`. Nested `proven.And` flattens fully. Inline `proven.Or` and `proven.Not` at obligation sites are v2 scope — they need disjunctive / negation fact representations the analyzer does not yet carry, and strict mode rejects them with a message that points at inference rules (`infer.From(a).To(target)` plus `infer.From(b).To(target)`) as the supported route for Or.
+
+This is the "no silent bypass" principle: a predicate the scanner cannot track by identity cannot be used for cross-package discharge, and accepting it would silently weaken the contract.
 
 </details>
 
