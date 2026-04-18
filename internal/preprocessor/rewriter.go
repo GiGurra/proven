@@ -62,7 +62,7 @@ func rewriteSource(path string, f *ast.File, fset *token.FileSet, imp *importInf
 		return nil, false, err
 	}
 
-	edits := collectRewrites(f, fset, imp.provenAlias, trustAlias)
+	edits, usedAliases := collectRewrites(f, fset, imp.provenAlias, trustAlias)
 	if len(edits) == 0 {
 		return nil, false, nil
 	}
@@ -86,7 +86,35 @@ func rewriteSource(path string, f *ast.File, fset *token.FileSet, imp *importInf
 		// the `any` constraint.
 		raw = appendImportSentinel(raw, trustAlias+".That[struct{}]")
 	}
+	// Third-party predicate packages referenced only inside erased
+	// calls fall into the same trap: the call that used them is
+	// gone, so the import becomes "imported and not used". For each
+	// such alias we saw named inside an erased span we emit one
+	// sentinel. Ordered for determinism so regression tests are
+	// stable across runs.
+	for _, alias := range sortedAliasKeys(usedAliases) {
+		raw = appendImportSentinel(raw, alias+"."+usedAliases[alias])
+	}
 	return raw, true, nil
+}
+
+// sortedAliasKeys returns the keys of m in lexicographic order so
+// the emitted sentinel ordering is deterministic — important for
+// byte-identical test fixtures and predictable diff output.
+func sortedAliasKeys(m map[string]string) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
 }
 
 // appendImportSentinel appends `var _ = <rhs>` on a fresh line
@@ -117,7 +145,14 @@ type rewriteEdit struct {
 }
 
 // collectRewrites walks f and returns a list of rewriteEdit
-// entries for every call the rewriter erases:
+// entries for every call the rewriter erases, plus a map of
+// non-proven/non-trust import aliases referenced inside those
+// erased spans (alias → first-seen selector name). The map lets
+// the caller emit import sentinels for third-party predicate
+// packages that would otherwise end up "imported and not used"
+// once the erasure runs.
+//
+// Erased shapes:
 //
 //   - proven.That(...) used as a statement — whole ExprStmt
 //     blanked.
@@ -131,8 +166,14 @@ type rewriteEdit struct {
 // all captured. An empty alias ("" for a package not imported
 // by the file) makes the corresponding branch a no-op via
 // isSel's alias check.
-func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias, trustAlias string) []rewriteEdit {
+func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias, trustAlias string) ([]rewriteEdit, map[string]string) {
 	var edits []rewriteEdit
+	usedAliases := map[string]string{}
+	recordUsed := func(args []ast.Expr) {
+		for _, arg := range args {
+			collectAliasRefs(arg, provenAlias, trustAlias, usedAliases)
+		}
+	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.ExprStmt:
@@ -149,6 +190,7 @@ func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias, trustAlias s
 				start: start, end: end,
 				argStart: end, argEnd: end,
 			})
+			recordUsed(call.Args)
 			// Fall through so a nested proven.Returns inside the
 			// args of an about-to-be-erased proven.That is still
 			// collected; leaving it un-erased would waste bytes
@@ -173,11 +215,42 @@ func collectRewrites(f *ast.File, fset *token.FileSet, provenAlias, trustAlias s
 				start: callStart, end: callEnd,
 				argStart: argStart, argEnd: argEnd,
 			})
+			// Only the wrapper is erased — args[0] survives — so
+			// track aliases used in args[1:], which become dead.
+			if len(node.Args) > 1 {
+				recordUsed(node.Args[1:])
+			}
 			return true
 		}
 		return true
 	})
-	return edits
+	return edits, usedAliases
+}
+
+// collectAliasRefs walks expr and records, for every SelectorExpr
+// whose receiver is an import-alias Ident (other than proven or
+// trust), the first selector name we see. The alias → name map lets
+// the rewriter emit one import sentinel per package whose only
+// references were inside erased call spans.
+func collectAliasRefs(expr ast.Expr, provenAlias, trustAlias string, out map[string]string) {
+	ast.Inspect(expr, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		id, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if id.Name == provenAlias || id.Name == trustAlias {
+			return true
+		}
+		if _, seen := out[id.Name]; seen {
+			return true
+		}
+		out[id.Name] = sel.Sel.Name
+		return true
+	})
 }
 
 // applyRewrites mutates raw in place, blanking the non-surviving
