@@ -2,9 +2,9 @@
 
 Four cooperating packages, each covering a distinct class of constraint problem. Each package is named for its *mechanism* so the call site reads as what the program actually does: static proof (`proven`), runtime check (`prove`), declared implication (`infer`), or unverified assertion (`trust`).
 
-## `proven` — compile-time contracts with runtime fallback
+## `proven` — compile-time contracts
 
-Already implemented. Precondition/postcondition assertions declared inside function bodies:
+Precondition / postcondition assertions declared inside function bodies:
 
 ```go
 func Transfer(amount int, note string) error {
@@ -14,9 +14,11 @@ func Transfer(amount int, note string) error {
 }
 ```
 
-Under the preprocessor: each caller must discharge these via flow analysis; calls that succeed erase the `That` to zero runtime cost; calls that fail break the build. Without the preprocessor: the `That` call runs as a plain runtime contract check.
+Under the preprocessor: each caller must discharge these via flow analysis; calls that succeed erase the `That` to zero runtime cost; calls that fail break the build. Without the preprocessor, the library's `That` call is a plain runtime contract check, and the link gate keeps you from shipping a build that accidentally skipped the preprocessor.
 
-**Use for:** internal APIs where callers are expected to have already proven their inputs. Proofs flow through call chains: a value returned via `proven.Returns` carries its postcondition into the next call — and the preprocessor also **auto-infers** postconditions for functions that don't use `proven.Returns`, by snapshotting the facts on the returned identifier at each `return` and advertising their intersection to callers. Use explicit `proven.Returns` when you want the contract to be a declared, compiler-verified claim (API boundary, design anchor); skip it for internal helpers where the body already proves what callers need.
+**Postconditions are automatic.** The analyzer publishes the facts that hold on a function's returned identifier — every caller sees them, across package boundaries. Wrap a return in `proven.Returns(v, preds...)` to make the postcondition a compiler-verified contract declared at the site: the preprocessor checks at the declaration that each predicate is already a fact on `v`, so the callee cannot advertise an unproven claim. Use explicit `proven.Returns` at API boundaries where the output shape belongs in the signature; skip it for internal helpers where the body already proves what callers need.
+
+**Use for:** internal APIs where callers are expected to have already proven their inputs, and library APIs whose output guarantees other code depends on.
 
 See [`design.md`](design.md) for the full specification.
 
@@ -128,11 +130,13 @@ Earlier iterations of this document proposed a Zig-style `infer.Const` for evalu
 
 All four packages share the preprocessor infrastructure (toolexec entry, per-package scan, AST walker, diagnostic emitter) but expose targeted APIs for each problem class. Users import only what they need.
 
-## Current state
+## API surface at a glance
 
-| Package | Status |
+| Package | Exports |
 |---------|--------|
-| `proven` | `That` / `Returns` / `And` / `Or` / `Not` implemented; preprocessor discharges call sites (Phases 1–5) and erases cleared calls. |
-| `prove`  | `That(v, preds...) (T, error)` and `Must(v, preds...) T` implemented; preprocessor propagates post-check facts (Phase 3). |
-| `trust`  | `That(v, preds...) T` implemented in `pkg/trust/`; preprocessor injects facts at every call site and erases the call (Phase 7). |
-| `infer`  | Inference rules (`From(p).To(q)` / `From(p).Given(c).To(q)`) implemented; preprocessor uses them for backward-chaining discharge (Phase 4). |
+| `pkg/proven` | `That(v, preds...)`, `Returns(v, preds...) T`, `And` / `Or` / `Not` combinators |
+| `pkg/prove`  | `That(v, preds...) (T, error)`, `Must(v, preds...) T` |
+| `pkg/trust`  | `That(v, preds...) T`, `Returns(v, preds...) T` |
+| `pkg/infer`  | `From(preds...).[Given(preds...).]To(preds...)` builder for inference rules |
+| `pkg/infertest` | `Verify(t, rule, samples...)`, `VerifyApplies(t, rule, samples...)` |
+| `pkg/proventest` | `WithChecks(fn)`, `AssertFails(t, pred, fn)`, `AssertPasses(t, fn)`, `AssertAnyFailure(t, fn)` |

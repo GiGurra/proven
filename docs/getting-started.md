@@ -57,7 +57,7 @@ The line `if isPositive(x)` is not a special "proof" API. It's an ordinary Go fu
 
 No separate proof object. No generics ceremony. Just Go control flow.
 
-You can produce the same fact in other ways — `if !isPositive(x) { return }` then a call on the following line, `v, err := prove.That(raw, isPositive)` then an `if err != nil { return }` guard, a `proven.Returns(..., isPositive)` postcondition on a function whose return value you assigned, or a `trust.That(raw, isPositive)` injection. All of them produce the same `{predicate: isPositive, var: x}` fact in the analyzer, and all of them discharge `double(x)` identically. The right choice is whichever matches the shape of the surrounding code.
+You can produce the same fact in other ways — `if !isPositive(x) { return }` then a call on the following line, `v, err := prove.That(raw, isPositive)` then an `if err != nil { return }` guard, a function whose body proves `isPositive` on its returned identifier (with or without an explicit `proven.Returns`), or a `trust.That(raw, isPositive)` injection. All of them produce the same `{predicate: isPositive, var: x}` fact in the analyzer, and all of them discharge `double(x)` identically. The right choice is whichever matches the shape of the surrounding code.
 
 ### What a missing proof looks like
 
@@ -98,7 +98,7 @@ Same `file:line:col:` format Go's own compiler uses, so your editor click-throug
 
 - Add an explicit guard: `if isPositive(x) { fmt.Println(double(x)) }`
 - Normalize the value at a boundary: `v, err := prove.That(x, isPositive); if err != nil { ... }; fmt.Println(double(v))`
-- Have the producer advertise the fact — and in most cases no `proven.Returns` is needed. If `readFromSomewhere`'s body establishes `isPositive` on its returned identifier (via a guard, a `prove.Must`, or a declared precondition), the preprocessor **auto-infers** that postcondition and every caller picks it up. Use explicit `proven.Returns(v, isPositive)` when you want the contract to be a compiler-verified claim at the declaration site (API boundary).
+- Let the producer advertise the fact. If `readFromSomewhere`'s body establishes `isPositive` on its returned identifier — via a guard, a `prove.Must`, or its own declared precondition — callers pick the postcondition up automatically. Wrap the return in `proven.Returns(v, isPositive)` to make the contract a compiler-verified declaration at the site.
 - Take responsibility: `v := trust.That(x, isPositive); fmt.Println(double(v))` — if `x` was validated by a mechanism the analyzer cannot see.
 
 Each produces the same fact; the preprocessor accepts the build after any of them.

@@ -13,16 +13,22 @@ func Transfer(amount int, note string) error {
     // ... body ...
 }
 
-// Declare a postcondition on a return value. The value must carry the
-// predicate as a fact at the Returns site — here the function's own
-// declared precondition does that work:
+// Callers see the facts the body proves on the returned identifier —
+// no explicit postcondition call required:
 func Normalize(x int) int {
+    proven.That(x, isPositive)
+    return x // callers get isPositive as a fact on the result
+}
+
+// proven.Returns makes the postcondition a compiler-verified contract
+// declared at the site — use it at API boundaries:
+func Clamp(x int) int {
     proven.That(x, isPositive)
     return proven.Returns(x, isPositive)
 }
 
 // For a literal or computed expression the analyzer can't reason about,
-// trust.Returns vouches-and-advertises in one call:
+// trust.Returns advertises the postcondition without a runtime check:
 func DefaultUserID() int {
     return trust.Returns(42, isPositive) // programmer: "42 is obviously positive"
 }
@@ -66,4 +72,4 @@ Proven addresses this by letting you *test* at runtime that the declarations are
 
 ## Status
 
-Phases 1–8 are done: stub injection, obligation scan, flow-sensitive discharge, inference-rule backward chaining, wiring + diagnostics, zero-cost erasure, cross-package sidecars, local fact injection via `pkg/trust`, relations via tuple subjects, and property-test helpers for inference rules. Phase 9 (performance, caching, cross-process sharing) is in progress.
+Experimental — APIs and internals may change. See the [roadmap](todo/roadmap.md) for the current state of the preprocessor pipeline and what's next.

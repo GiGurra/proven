@@ -16,27 +16,26 @@ func Transfer(amount int, note string) error {
     // ... body ...
 }
 
-// No proven.Returns needed in the common case. The preprocessor snapshots
-// the facts that hold on the returned identifier and advertises their
-// intersection to every caller automatically:
+// Callers of a function see the facts the body proves on the returned
+// identifier — no explicit postcondition call required:
 func Normalize(x int) int {
     proven.That(x, isPositive)
-    return x // callers see isPositive as a fact on the result, no explicit Returns
+    return x // callers get isPositive as a fact on the result
 }
 
-// Nested calls work the same way — target's precondition discharges because
-// Normalize's inferred postcondition flows into the argument position:
+// Nested calls thread postconditions into the argument position:
 //   target(Normalize(x))  // isPositive carries through
 
-// Use explicit proven.Returns when you want the compiler to verify a
-// specific contract at the declaration site (API boundary, design anchor):
+// proven.Returns turns the postcondition into a verified contract
+// declared at the site — use it at API boundaries where the claim
+// should be the function's signature, not an emergent property:
 func Clamp(x int) int {
     proven.That(x, isPositive)
-    return proven.Returns(x, isPositive) // verified + advertised
+    return proven.Returns(x, isPositive)
 }
 
-// For a literal or computed expression the analyzer can't reason about,
-// trust.Returns vouches-and-advertises in one call:
+// trust.Returns advertises a postcondition without a runtime check —
+// for literal or computed values the analyzer cannot reason about:
 func DefaultUserID() int {
     return trust.Returns(42, isPositive) // programmer: "42 is obviously positive"
 }
@@ -100,31 +99,22 @@ func ChargeFX(amount int, currency string, userID int) error {
 }
 ```
 
-Callers of a function with `proven.Returns(v, isPositive)` as its return automatically get `isPositive` as a fact on the returned value — no re-check at the call site. The same applies **without** an explicit `Returns`: the preprocessor inspects the returned identifier at each `return` statement, takes the intersection of facts across every return, and advertises that intersection to callers.
-
-</details>
-
-<details>
-<summary><strong>Auto-inferred postconditions — when you don't need <code>proven.Returns</code></strong></summary>
-
-Most functions don't need `proven.Returns` at all. The analyzer walks the body, snapshots the fact set on the returned identifier at every `return`, and publishes the intersection as the function's postcondition — which callers plant on their LHS / nested-argument position and use to discharge downstream obligations.
+Postconditions flow to callers automatically. The analyzer reads the facts on a function's returned identifier at each `return` and advertises their intersection:
 
 ```go
 func normalize(p int) int {
     proven.That(p, isPositive)
-    return p // derived postcondition: isPositive on the returned identifier
+    return p // postcondition: isPositive on the result
 }
 
-// Nested call — target's precondition discharges because normalize's
-// inferred postcondition flows into the argument position:
 func caller(x int) {
     if isPositive(x) {
-        target(normalize(x)) // no intermediate binding needed
+        target(normalize(x)) // discharges without an intermediate binding
     }
 }
 ```
 
-The intersection-across-returns rule is sound by construction: a return that yields a literal (`return 0`) or a computed expression (`return a + b`) contributes no analyzer facts, so a function that sometimes returns a non-identifier advertises nothing and the build fails with a normal undischarged diagnostic. Explicit `proven.Returns` still has its place as a **verified contract anchor** at API boundaries — the compiler checks the claim holds and the site becomes the declared shape of the function's output.
+A return that yields a literal or a computed expression contributes no facts, so a function with mixed return shapes advertises only what holds at every return site. To make the postcondition a **declared, compiler-verified contract** at the site — for API-boundary functions where the claim belongs in the signature — wrap the return in `proven.Returns`.
 
 </details>
 
@@ -197,12 +187,13 @@ func F(x int) {
     G(x)                       // G wants isPositive — discharged from seeding
 }
 
-// 5. Callee's advertised postcondition (explicit proven.Returns OR
-//    analyzer-inferred from return-fact snapshots). Works at an
-//    assignment AND inside a nested call argument.
-v := DefaultUserID() // advertises isPositive (explicit or derived)
-Target(v)            // isPositive(v) is a fact
-Target(DefaultUserID()) // same: postcondition flows into the nested arg
+// 5. Callee's advertised postcondition. Every function publishes the
+//    facts its body proves on the returned identifier; proven.Returns
+//    and trust.Returns additionally declare them as a verified/trusted
+//    contract. Flows at assignment AND nested-argument positions.
+v := DefaultUserID()    // advertises isPositive
+Target(v)               // isPositive(v) is a fact
+Target(DefaultUserID()) // same: flows into the nested arg
 
 // 6. prove.That or prove.Must success.
 v, err := prove.That(raw, isPositive)
@@ -216,15 +207,15 @@ Target(v)                        // isPositive(v) is a fact
 
 Obligations are discharged by direct fact match, by backward-chaining through declared inference rules, or by a `trust.That` injection. The proof rides along as far as you pass the value: each function along the chain declares the precondition it needs as its own `proven.That`, which — once discharged by the caller — becomes a fact inside that function's body for every downstream call that also needs it.
 
-**Predicates must be named — with two structural carve-outs for `proven.And` and `proven.Or`.** Every predicate argument to `proven.That`, `proven.Returns`, `prove.That`, `prove.Must`, `trust.That`, and each slot in `infer.From(...).[Given(...).]To(...)` must ultimately reduce to named functions or `pkg.Name` selectors. Function literals (`proven.That(x, func(n int) bool { ... })`) fail the build with a diagnostic pointing at the offending expression — declare them as package-level vars and reference the name.
+**Predicates must be named.** Every predicate argument to `proven.That`, `proven.Returns`, `prove.That`, `prove.Must`, `trust.That`, and each slot in `infer.From(...).[Given(...).]To(...)` reduces to named functions or `pkg.Name` selectors. Function literals fail the build — declare them as package-level vars and reference the name.
 
-Inline `proven.And(a, b)` is accepted at obligation / fact sites: the scanner decomposes it into its leaf predicates on ingest, so `proven.That(x, proven.And(a, b))` is equivalent to `proven.That(x, a, b)`. Nested `And` flattens fully.
+Inline `proven.And(a, b)` is accepted at obligation and fact sites: the scanner flattens it to its leaf predicates, so `proven.That(x, proven.And(a, b))` reads the same as `proven.That(x, a, b)`. Nested `And` flattens fully.
 
-Inline `proven.Or(a, b)` is also accepted at `proven.That`, `proven.Returns`, `prove.That`/`prove.Must`, and `trust.That`/`trust.Returns`. An Or-obligation on a variable discharges when **any** single alternative holds as a leaf fact, OR when a structurally-matching Or-fact was planted (e.g. from `prove.That(raw, proven.Or(a, b))`). Or's arguments must be named leaves — nested combinators inside Or are v2 scope. Or inside `infer.From/Given/To` slots stays rejected: a disjunctive premise/conclusion is better expressed as one rule per branch.
+Inline `proven.Or(a, b)` is accepted at `proven.That`, `proven.Returns`, `prove.That`/`prove.Must`, and `trust.That`/`trust.Returns`. A disjunctive obligation discharges when any single alternative holds as a leaf fact, or when a structurally-matching Or-fact is in scope (e.g. from `prove.That(raw, proven.Or(a, b))`). `Or`'s arguments are named leaves; nested combinators inside `Or` and `Or` inside `infer.From/Given/To` slots fail the build.
 
-Inline `proven.Not` remains rejected — it would need a negation-fact representation the analyzer does not yet carry.
+`proven.Not` at an obligation or fact site is not supported.
 
-This is the "no silent bypass" principle: a predicate the scanner cannot track by identity cannot be used for cross-package discharge, and accepting it would silently weaken the contract.
+This is the "no silent bypass" principle: a predicate the scanner cannot track by identity cannot be used for cross-package discharge.
 
 </details>
 
@@ -384,7 +375,7 @@ Every existing discharge pattern works unchanged. Two deferred alternatives (cur
 
 2. **Cross-package sidecar.** Each clean-analyzed package writes its `PackageSummary` to `<.a-dir>/_pkg_.proven.json`. Downstream compiles parse the compile's `-importcfg` and read each imported package's sidecar so cross-package obligations are visible.
 
-3. **Analyze.** For each call site, a flow-sensitive walk of the caller decides which obligations are discharged and which are missing. Fact sources: preceding `if pred(x)`, early-return / panic guards, `&&`-conjoined conditions, `proven.Returns` postconditions, and successful `prove.That` / `prove.Must` (correctly gated on the err-check branch). A declared inference rule lets the analyzer discharge `Q` when `P` is known by backward chaining.
+3. **Analyze.** For each call site, a flow-sensitive walk of the caller decides which obligations are discharged and which are missing. Fact sources: preceding `if pred(x)`, early-return / panic guards, `&&`-conjoined conditions, a function's own declared preconditions, the callee's advertised postconditions (explicit `proven.Returns` or the intersection of facts on the returned identifier across every `return`), `prove.That` / `prove.Must` success branches, and `trust.That` local injections. Nested-call arguments get the inner callee's postcondition virtualized for the outer discharge check. A declared inference rule lets the analyzer discharge `Q` when `P` is known by backward chaining.
 
 4. **Emit or fail.** Undischarged obligations produce a Go-standard `file:line:col: proven: undischarged predicate X on parameter N of Y` diagnostic and the build fails before the real compile runs. When every obligation is discharged, the rewriter blanks every `proven.That` / `proven.Returns` / `trust.That` call span in the source the compiler sees. Edits are length-preserving so cmd/compile error columns still match user source column-for-column.
 
@@ -459,9 +450,7 @@ GOCACHE="$HOME/.cache/proven-build" go clean -cache
 <details>
 <summary><strong>Status</strong></summary>
 
-Phases 1–8 are done: stub injection, per-package obligation scan, flow-sensitive discharge with five fact sources, inference-rule backward chaining, wiring + diagnostics, zero-cost erasure, cross-package sidecars, local fact injection via `pkg/trust`, relations via tuple subjects, and property-test helpers for inference rules.
-
-Phase 9 (performance, caching, cross-process sharing patterned after [rewire](https://github.com/GiGurra/rewire)) is in progress. Compile-time evaluation of pure expressions — originally planned as `infer.Const` — was explored and declared out of scope (it's its own project). See [`docs/comptime.md`](docs/comptime.md) for the full exploration.
+Experimental — APIs and internals may change. The [roadmap](docs/todo/roadmap.md) tracks the current state of the preprocessor pipeline and what's planned next. Compile-time evaluation of pure expressions is out of scope for this project; the [`docs/comptime.md`](docs/comptime.md) exploration records why.
 
 </details>
 
