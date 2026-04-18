@@ -38,7 +38,7 @@ func double(x int) int {
 func main() {
 	x := 5
 	if isPositive(x) {
-		fmt.Println(double(x)) // discharged
+		fmt.Println(double(x)) // isPositive(x) is proven; compiler accepts the call
 	}
 }
 ```
@@ -53,11 +53,11 @@ Nothing should print — the build succeeds.
 
 ### What the guard actually does
 
-The line `if isPositive(x)` is not a special "proof" API. It's an ordinary Go function call in an ordinary `if`. The preprocessor sees it, notes that `isPositive(x)` has been evaluated to true on the then-branch, and treats it as a **fact**. When you call `double(x)` inside that branch, the preprocessor looks at `double`'s declared precondition (`proven.That(x, isPositive)`) and discharges it against the fact it just collected.
+The line `if isPositive(x)` is not a special "proof" API. It's an ordinary Go function call in an ordinary `if`. The preprocessor sees it, notes that `isPositive(x)` has been evaluated to true on the then-branch, and treats it as a **fact**. When you call `double(x)` inside that branch, the preprocessor looks at `double`'s declared precondition (`proven.That(x, isPositive)`) and sees that the same fact is in scope — the precondition is proven and the call is accepted.
 
 No separate proof object. No generics ceremony. Just Go control flow.
 
-You can produce the same fact in other ways — `if !isPositive(x) { return }` then a call on the following line, `v, err := prove.That(raw, isPositive)` then an `if err != nil { return }` guard, a function whose body proves `isPositive` on its returned identifier (with or without an explicit `proven.Returns`), or a `trust.That(raw, isPositive)` injection. All of them produce the same `{predicate: isPositive, var: x}` fact in the analyzer, and all of them discharge `double(x)` identically. The right choice is whichever matches the shape of the surrounding code.
+You can produce the same fact in other ways — `if !isPositive(x) { return }` then a call on the following line, `v, err := prove.That(raw, isPositive)` then an `if err != nil { return }` guard, a function whose body proves `isPositive` on its returned identifier (with or without an explicit `proven.Returns`), or a `trust.That(raw, isPositive)` injection. All of them produce the same `{predicate: isPositive, var: x}` fact in the analyzer, and all of them prove `double(x)`'s precondition identically. The right choice is whichever matches the shape of the surrounding code.
 
 ### What a missing proof looks like
 
@@ -91,7 +91,7 @@ func readFromSomewhere() int { return 5 }
 Rebuild and the preprocessor refuses:
 
 ```
-main.go:NN:CC: proven: undischarged predicate isPositive on parameter 0 of double
+main.go:NN:CC: proven: cannot prove isPositive on parameter 0 of double
 ```
 
 Same `file:line:col:` format Go's own compiler uses, so your editor click-through works the same as any build error. The diagnostic names the missing predicate, the parameter index, and the callee — so the fix is one of:
@@ -110,8 +110,8 @@ As far as you pass the value, as long as each function along the way declares wh
 ```go
 func target(x int) {
     proven.That(x, isPositive)  // target's own precondition
-    deeper(x)                   // deeper requires isPositive — discharged, because
-                                // target already knows x is isPositive.
+    deeper(x)                   // deeper requires isPositive — already proven,
+                                // because target's own precondition says so.
 }
 
 func deeper(x int) {
@@ -120,7 +120,7 @@ func deeper(x int) {
 }
 ```
 
-Inside `target`'s body, `x` is known to be `isPositive` — that's the analyzer's starting fact set when analyzing `target`. So `target` can call `deeper(x)` without re-proving. The caller of `target` had to discharge `target`'s precondition once, at the call site. From there the fact rides along through every function that declares the same precondition and passes the value through.
+Inside `target`'s body, `x` is known to be `isPositive` — that's the analyzer's starting fact set when analyzing `target`. So `target` can call `deeper(x)` without re-proving. The caller of `target` had to prove `target`'s precondition once, at the call site. From there the fact rides along through every function that declares the same precondition and passes the value through.
 
 You don't re-prove at every hop. You declare what each function needs once, and the caller proves it once at its call site.
 

@@ -378,7 +378,7 @@ func lastIndex(s, sub string) int {
 //
 // The message form —
 //
-//	proven: undischarged predicate <pred> on parameter <idx> of <callee>
+//	proven: cannot prove <pred> on parameter <idx> of <callee>
 //
 // mirrors Go's compile-diagnostic phrasing closely enough for
 // editor click-through to work and is explicit about which
@@ -402,7 +402,7 @@ func dischargeDiagnostics(d CallDischarge, fset *token.FileSet, currentPkg strin
 				Line: pos.Line,
 				Col:  pos.Column,
 				Msg: fmt.Sprintf(
-					"proven: undischarged predicate %s on parameter %d of %s",
+					"proven: cannot prove %s on parameter %d of %s",
 					predicateLabel(missing, currentPkg), p.ParamIdx, callee,
 				),
 			})
@@ -413,7 +413,7 @@ func dischargeDiagnostics(d CallDischarge, fset *token.FileSet, currentPkg strin
 				Line: pos.Line,
 				Col:  pos.Column,
 				Msg: fmt.Sprintf(
-					"proven: undischarged disjunction proven.Or(%s) on parameter %d of %s",
+					"proven: cannot prove proven.Or(%s) on parameter %d of %s",
 					altsLabelList(alts, currentPkg), p.ParamIdx, callee,
 				),
 			})

@@ -1,1 +1,1 @@
-proven: undischarged predicate isPositive
+proven: cannot prove isPositive

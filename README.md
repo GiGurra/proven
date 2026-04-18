@@ -42,7 +42,7 @@ func DefaultUserID() int {
     return trust.Returns(42, isPositive) // programmer: "42 is obviously positive"
 }
 
-// Declare an implication once; the preprocessor uses it to discharge obligations:
+// Declare an implication once; the preprocessor uses it to prove preconditions:
 var _ = infer.From(isSmallPositive).To(isPositive)
 
 // Boundary validators establish facts on raw input:
@@ -51,7 +51,7 @@ var _ = infer.From(isSmallPositive).To(isPositive)
 // - trust.That(raw, pred) skips the runtime check (programmer's word)
 
 // Put it together: validate once at the boundary, then every
-// downstream precondition discharges at compile time.
+// downstream precondition is proven at compile time.
 func main() {
     amount, err := prove.That(readAmount(), isPositive)
     if err != nil {
@@ -71,9 +71,9 @@ Signatures stay plain Go. Predicates are ordinary `func(T) bool`. No wrapper typ
 **Preconditions as visible, machine-checked documentation.** A `proven.That(x, isPositive)` at the top of a function body does two jobs at once:
 
 - Documentation a reader can't miss — the requirement lives in the code, not in a comment that drifts out of sync.
-- A check the compiler runs at every call site, at build time, at zero runtime cost once discharged.
+- A check the compiler runs at every call site, at build time, at zero runtime cost once the proof has been established.
 
-Declare once what must hold. Nobody forgets — the requirement is right there. Nobody re-validates defensively — a discharged obligation erases to nothing. A predicate written once is enforced everywhere the function is called, for as long as it stays declared.
+Declare once what must hold. Nobody forgets — the requirement is right there. Nobody re-validates defensively — once a precondition is proven at a call site, the check erases to nothing. A predicate written once is enforced everywhere the function is called, for as long as it stays declared.
 
 ## Quick start
 
@@ -128,7 +128,7 @@ func normalize(p int) int {
 
 func caller(x int) {
     if isPositive(x) {
-        target(normalize(x)) // discharges without an intermediate binding
+        target(normalize(x)) // isPositive carries through; call accepted
     }
 }
 ```
@@ -138,14 +138,14 @@ A return that yields a literal or a computed expression contributes no facts, so
 </details>
 
 <details>
-<summary><strong>Discharge patterns — how facts get established, and what happens when they aren't</strong></summary>
+<summary><strong>Proving a precondition — how facts get established, and what happens when they aren't</strong></summary>
 
 **The core insight:** you don't use a special "proof" API to establish a fact. The preprocessor watches the caller's ordinary control flow and treats any check it can see as a fact in the then-branch. A plain `if isPositive(x) { ... }` and a boundary-validating `prove.That(raw, isPositive)` produce **the same fact** in the analyzer — the difference is only where the value came from and whether you wanted an error return.
 
 ```go
 // Path A — regular predicate call in a guard.
 if isPositive(x) {
-    Transfer(x, "hi")   // discharged: isPositive(x) is a fact in the then-branch
+    Transfer(x, "hi")   // isPositive(x) is proven; the compiler accepts the call
 }
 
 // Path B — prove.That for boundary-validated values, same resulting fact.
@@ -153,10 +153,10 @@ v, err := prove.That(raw, isPositive)
 if err != nil {
     return err
 }
-Transfer(v, "hi")       // discharged: isPositive(v) is a fact on the err==nil side
+Transfer(v, "hi")       // isPositive(v) holds on the err==nil side; call accepted
 ```
 
-Both discharge `proven.That(amount, isPositive)` inside `Transfer` identically. Pick whichever matches the shape of the surrounding code.
+Either path proves `Transfer`'s precondition. Pick whichever matches the shape of the surrounding code.
 
 **What a missed proof looks like.** If you drop the guard, the build fails:
 
@@ -173,10 +173,10 @@ func main() {
 ```
 
 ```
-main.go:NN:CC: proven: undischarged predicate isPositive on parameter 0 of Transfer
+main.go:NN:CC: proven: cannot prove isPositive on parameter 0 of Transfer
 ```
 
-Same `file:line:col:` format Go's own compiler uses, so your editor click-through works. The diagnostic names the missing predicate, which parameter it's on, and which callee needed it — so the fix is either an explicit guard, a `prove.That` at the boundary, a `proven.Returns` postcondition from the producer, or a `trust.That` injection if you've validated it by a mechanism the analyzer can't see.
+Same `file:line:col:` format Go's own compiler uses, so your editor click-through works. The diagnostic names the missing predicate, which parameter it's on, and which callee needed it — so the fix is either an explicit guard, a `prove.That` at the boundary, a producer that advertises the postcondition, or a `trust.That` injection if you've validated it by a mechanism the analyzer can't see.
 
 **Fact sources** the preprocessor recognizes:
 
@@ -203,7 +203,7 @@ if isPositive(x) && x < 100 {
 //    so inside F the facts hold by construction.
 func F(x int) {
     proven.That(x, isPositive) // precondition
-    G(x)                       // G wants isPositive — discharged from seeding
+    G(x)                       // G wants isPositive — already proven from F's declared input
 }
 
 // 5. Callee's advertised postcondition. Every function publishes the
@@ -224,22 +224,22 @@ v := trust.That(raw, isPositive) // programmer's word, no runtime check
 Target(v)                        // isPositive(v) is a fact
 ```
 
-Obligations are discharged by direct fact match, by backward-chaining through declared inference rules, or by a `trust.That` injection. The proof rides along as far as you pass the value: each function along the chain declares the precondition it needs as its own `proven.That`, which — once discharged by the caller — becomes a fact inside that function's body for every downstream call that also needs it.
+A precondition is proven by a direct fact match, by backward chaining through declared inference rules, or by a `trust.That` injection. The proof rides along as far as you pass the value: each function along the chain declares the precondition it needs as its own `proven.That`, and once the caller has proven it at the call site, that same fact holds inside the function's body for every downstream call that also needs it.
 
 **Predicates must be named.** Every predicate argument to `proven.That`, `proven.Returns`, `prove.That`, `prove.Must`, `trust.That`, and each slot in `infer.From(...).[Given(...).]To(...)` reduces to named functions or `pkg.Name` selectors. Function literals fail the build — declare them as package-level vars and reference the name.
 
 Inline `proven.And(a, b)` is accepted at obligation and fact sites: the scanner flattens it to its leaf predicates, so `proven.That(x, proven.And(a, b))` reads the same as `proven.That(x, a, b)`. Nested `And` flattens fully.
 
-Inline `proven.Or(a, b)` is accepted at `proven.That`, `proven.Returns`, `prove.That`/`prove.Must`, and `trust.That`/`trust.Returns`. A disjunctive obligation discharges when any single alternative holds as a leaf fact, or when a structurally-matching Or-fact is in scope (e.g. from `prove.That(raw, proven.Or(a, b))`). `Or`'s arguments are named leaves; nested combinators inside `Or` and `Or` inside `infer.From/Given/To` slots fail the build.
+Inline `proven.Or(a, b)` is accepted at `proven.That`, `proven.Returns`, `prove.That`/`prove.Must`, and `trust.That`/`trust.Returns`. A disjunctive precondition is proven when any single alternative holds as a leaf fact, or when a structurally-matching Or-fact is in scope (e.g. from `prove.That(raw, proven.Or(a, b))`). `Or`'s arguments are named leaves; nested combinators inside `Or` and `Or` inside `infer.From/Given/To` slots fail the build.
 
 `proven.Not` at an obligation or fact site is not supported.
 
-This is the "no silent bypass" principle: a predicate the scanner cannot track by identity cannot be used for cross-package discharge.
+This is the "no silent bypass" principle: a predicate the scanner cannot track by identity cannot be used to prove cross-package calls.
 
 </details>
 
 <details>
-<summary><strong>Inference rules — discharge by implication</strong></summary>
+<summary><strong>Inference rules — proving by implication</strong></summary>
 
 When a caller has established predicate `P` but a callee requires predicate `Q`, declare the implication once at package scope:
 
@@ -256,7 +256,7 @@ var _ = infer.From(isEven).Given(isGreaterThanZero).To(isPositive)
 var _ = infer.From(isEven, isPositive).To(isNonNeg, isNonZero)
 ```
 
-The preprocessor consumes these during scan and uses backward chaining to discharge obligations without re-proving from scratch. Rules are **trusted** — the preprocessor does not symbolically verify them. Declarers are responsible for soundness, and `infertest.Verify` lets you property-test rules on sample inputs:
+The preprocessor consumes these during scan and uses backward chaining to prove preconditions without re-deriving the implication at each call site. Rules are **trusted** — the preprocessor does not symbolically verify them. Declarers are responsible for soundness, and `infertest.Verify` lets you property-test rules on sample inputs:
 
 ```go
 var myRule = infer.From(isSmallPositive).To(isPositive)
@@ -319,7 +319,7 @@ func handleTransfer(r *http.Request) error {
         return err
     }
     // From here on, amount is known isPositive — Transfer's
-    // obligation discharges without a re-check.
+    // precondition is proven without a re-check.
     return Transfer(amount, req.Note)
 }
 ```
@@ -331,7 +331,7 @@ func handleTransfer(r *http.Request) error {
 <details>
 <summary><strong>The "trust me" escape hatch — <code>pkg/trust</code></strong></summary>
 
-Every other discharge path in proven gets the compiler (or a runtime check) behind the claim. `trust.That` is the single call site where **you** stand behind it instead — no runtime check, no static proof, just your word and the git blame.
+Every other path to proving a precondition gets the compiler (or a runtime check) behind the claim. `trust.That` is the single call site where **you** stand behind it instead — no runtime check, no static proof, just your word and the git blame.
 
 ```go
 import "github.com/GiGurra/proven/pkg/trust"
@@ -340,7 +340,7 @@ import "github.com/GiGurra/proven/pkg/trust"
 // invariant, DB CHECK constraint) — a redundant re-check would be cost
 // for no safety gain.
 v := trust.That(raw, isPositive)
-Transfer(v, note) // isPositive discharged on the programmer's word
+Transfer(v, note) // isPositive is taken on the programmer's word; compiler accepts the call
 ```
 
 Reach for `prove.Must` first if a free runtime check would do — `trust.That` earns its keep only when re-validation would duplicate a known-correct earlier check and the cost is meaningful.
@@ -378,12 +378,12 @@ func modifyResource(a AuthCtx) {
 func handler(s Session, u User, r Resource) {
     a := AuthCtx{S: s, U: u, R: r}
     if canModify(a) {
-        modifyResource(a) // discharged via the unary analyzer, no new machinery
+        modifyResource(a) // canModify(a) is proven; the call is accepted
     }
 }
 ```
 
-Every existing discharge pattern works unchanged. Two deferred alternatives (currying, and an explicit `proven.Relation` API) and the triggers that would reopen the decision are captured in [`docs/relations.md`](docs/relations.md).
+Every proof pattern that works for unary predicates works for tuple subjects too. Two deferred alternatives (currying, and an explicit `proven.Relation` API) and the triggers that would reopen the decision are captured in [`docs/relations.md`](docs/relations.md).
 
 </details>
 
@@ -394,9 +394,9 @@ Every existing discharge pattern works unchanged. Two deferred alternatives (cur
 
 2. **Cross-package sidecar.** Each clean-analyzed package writes its `PackageSummary` to `<.a-dir>/_pkg_.proven.json`. Downstream compiles parse the compile's `-importcfg` and read each imported package's sidecar so cross-package obligations are visible.
 
-3. **Analyze.** For each call site, a flow-sensitive walk of the caller decides which obligations are discharged and which are missing. Fact sources: preceding `if pred(x)`, early-return / panic guards, `&&`-conjoined conditions, a function's own declared preconditions, the callee's advertised postconditions (explicit `proven.Returns` or the intersection of facts on the returned identifier across every `return`), `prove.That` / `prove.Must` success branches, and `trust.That` local injections. Nested-call arguments get the inner callee's postcondition virtualized for the outer discharge check. A declared inference rule lets the analyzer discharge `Q` when `P` is known by backward chaining.
+3. **Analyze.** For each call site, a flow-sensitive walk of the caller decides which of the callee's preconditions are proven and which remain unproven. Fact sources: preceding `if pred(x)`, early-return / panic guards, `&&`-conjoined conditions, a function's own declared preconditions, the callee's advertised postconditions (explicit `proven.Returns` or the intersection of facts on the returned identifier across every `return`), `prove.That` / `prove.Must` success branches, and `trust.That` local injections. Nested-call arguments get the inner callee's postcondition virtualized for the outer check. A declared inference rule lets the analyzer prove `Q` when `P` is known by backward chaining.
 
-4. **Emit or fail.** Undischarged obligations produce a Go-standard `file:line:col: proven: undischarged predicate X on parameter N of Y` diagnostic and the build fails before the real compile runs. When every obligation is discharged, the rewriter blanks every `proven.That` / `proven.Returns` / `trust.That` call span in the source the compiler sees. Edits are length-preserving so cmd/compile error columns still match user source column-for-column.
+4. **Emit or fail.** Preconditions the analyzer cannot prove produce a Go-standard `file:line:col: proven: cannot prove X on parameter N of Y` diagnostic and the build fails before the real compile runs. When every precondition is proven, the rewriter blanks every `proven.That` / `proven.Returns` / `trust.That` call span in the source the compiler sees. Edits are length-preserving so cmd/compile error columns still match user source column-for-column.
 
 5. **Link-time IDE gate.** `proven.That` / `proven.Returns` wrap their checks in `atCompileTime(func() { ... })`, where `atCompileTime` is declared via `//go:linkname` to the external symbol `_proven_atCompileTime`. `gopls` and `go vet` see plain Go. But `go build` / `go test` on a main or test target refuses to link without the preprocessor — which supplies the missing symbol. Forgetting the preprocessor is a loud link failure, never a silent loss of static checking.
 

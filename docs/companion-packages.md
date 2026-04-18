@@ -14,9 +14,9 @@ func Transfer(amount int, note string) error {
 }
 ```
 
-Under the preprocessor: each caller must discharge these via flow analysis; calls that succeed erase the `That` to zero runtime cost; calls that fail break the build. Without the preprocessor, the library's `That` call is a plain runtime contract check, and the link gate keeps you from shipping a build that accidentally skipped the preprocessor.
+Under the preprocessor: each caller must prove these preconditions via flow analysis; calls the preprocessor accepts erase the `That` to zero runtime cost; calls it cannot prove fail the build. Without the preprocessor, the library's `That` call is a plain runtime contract check, and the link gate keeps you from shipping a build that accidentally skipped the preprocessor.
 
-**Postconditions are automatic.** The analyzer publishes the facts that hold on a function's returned identifier — every caller sees them, across package boundaries. `proven.Returns(v, preds...)` does NOT create the postcondition; it **pins** it to the declaration site. The preprocessor verifies that each listed predicate is already a fact on `v` at the return point, so a future edit that drops a guard (or changes which value is returned) breaks this function's own build instead of silently withdrawing the claim and radiating undischarged-obligation diagnostics out to every caller. Use explicit `proven.Returns` wherever the output contract is load-bearing — API boundaries, widely-called functions, anything whose signature other code depends on. Skip it for internal helpers where the emergent postcondition is enough.
+**Postconditions are automatic.** The analyzer publishes the facts that hold on a function's returned identifier — every caller sees them, across package boundaries. `proven.Returns(v, preds...)` does NOT create the postcondition; it **pins** it to the declaration site. The preprocessor verifies that each listed predicate is already a fact on `v` at the return point, so a future edit that drops a guard (or changes which value is returned) breaks this function's own build instead of silently withdrawing the claim and scattering cannot-prove diagnostics across every caller. Use explicit `proven.Returns` wherever the output contract is load-bearing — API boundaries, widely-called functions, anything whose signature other code depends on. Skip it for internal helpers where the emergent postcondition is enough.
 
 **Use for:** internal APIs where callers are expected to have already proven their inputs, and library APIs whose output guarantees other code depends on.
 
@@ -49,8 +49,8 @@ func handleTransfer(r *http.Request) error {
     if err := prove.Check(req.Amount, isPositive); err != nil {
         return err
     }
-    // From here on, req.Amount is proven isPositive — proven.That calls
-    // downstream discharge for free.
+    // From here on, req.Amount is proven isPositive — every
+    // downstream proven.That(amount, isPositive) is already satisfied.
     return Transfer(req.Amount, req.Note, req.Currency)
 }
 ```
@@ -59,7 +59,7 @@ func handleTransfer(r *http.Request) error {
 
 ## `trust` — the "trust me" escape hatch
 
-The one part of proven where the claim is yours, not the compiler's. Every other discharge path gets the compiler (or a runtime check) behind the fact; `trust.That` is the single call site where **you** sign for it instead. Used for values that have already been validated by a mechanism the analyzer cannot see — a JSON schema validator, a database CHECK constraint, an upstream generated decoder, an audited business-logic invariant — and where a redundant runtime re-check would be cost for no safety gain. Call-site naming makes the mechanism obvious:
+The one part of proven where the claim is yours, not the compiler's. Every other way to establish a fact gets the compiler (or a runtime check) behind the claim; `trust.That` is the single call site where **you** sign for it instead. Used for values that have already been validated by a mechanism the analyzer cannot see — a JSON schema validator, a database CHECK constraint, an upstream generated decoder, an audited business-logic invariant — and where a redundant runtime re-check would be cost for no safety gain. Call-site naming makes the mechanism obvious:
 
 ```go
 // prove.That — runtime check, error return
@@ -96,7 +96,7 @@ Two capabilities, unified under the "compile-time deduction" theme.
 
 ### Inference rules — now
 
-Declare that one predicate implies another, optionally under a context. The proven preprocessor consumes these rules at scan time and uses them to discharge obligations without the caller having to re-prove a stronger predicate from scratch:
+Declare that one predicate implies another, optionally under a context. The proven preprocessor consumes these rules at scan time and uses them to prove preconditions without the caller having to re-derive the implication from scratch:
 
 ```go
 // At package scope — picked up by the preprocessor.
@@ -120,13 +120,13 @@ Implemented: `pkg/infer/infer.go` (runtime stubs); `pkg/infertest/infertest.go` 
 
 ### Compile-time evaluation — not in scope here
 
-Earlier iterations of this document proposed a Zig-style `infer.Const` for evaluating pure expressions at build time. When we sat down to design it we concluded it belongs in a separate project: its mechanisms, use cases, and hard problems share almost nothing with contract-system predicates and their discharge. The full exploration — candidate execution models, real code spikes, final recommendation — lives in [`comptime.md`](comptime.md). The `infer` package in this project is specifically about predicate-implication declarations, nothing else.
+Earlier iterations of this document proposed a Zig-style `infer.Const` for evaluating pure expressions at build time. When we sat down to design it we concluded it belongs in a separate project: its mechanisms, use cases, and hard problems share almost nothing with proving contract-system preconditions. The full exploration — candidate execution models, real code spikes, final recommendation — lives in [`comptime.md`](comptime.md). The `infer` package in this project is specifically about predicate-implication declarations, nothing else.
 
 ## Why four packages
 
 - **Distinct intent.** `proven.That` says "caller must prove this"; `prove.That` / `prove.Must` say "this just came from outside, validate it now"; `trust.That` says "I've already validated this by other means, take my word for it"; `infer.From(p).To(q)` says "these predicates relate." Each verb carries its own semantics; conflating them behind a single API obscures which is happening.
 - **Distinct runtime semantics.** `proven.That` is erased by the preprocessor and has a no-op runtime stub; `prove.That` runs at runtime and returns an error; `prove.Must` runs at runtime and panics on failure; `trust.That` never runs any check; `infer.From(p).To(q)` is consumed by the preprocessor as a declaration with no runtime behavior beyond holding its predicates for `infertest.Verify`.
-- **Distinct preprocessor responsibilities.** The `proven` pass discharges via flow analysis; the `prove` pass injects facts at successful-check branches (runtime code is unchanged); the `trust` pass injects facts unconditionally and erases the call; the `infer` pass consumes declared rules for backward-chaining. Four passes, each focused.
+- **Distinct preprocessor responsibilities.** The `proven` pass proves preconditions via flow analysis; the `prove` pass injects facts at successful-check branches (runtime code is unchanged); the `trust` pass injects facts unconditionally and erases the call; the `infer` pass consumes declared rules for backward chaining. Four passes, each focused.
 
 All four packages share the preprocessor infrastructure (toolexec entry, per-package scan, AST walker, diagnostic emitter) but expose targeted APIs for each problem class. Users import only what they need.
 

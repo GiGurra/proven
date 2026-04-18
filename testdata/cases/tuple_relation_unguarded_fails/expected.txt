@@ -1,1 +1,1 @@
-undischarged predicate canModify on parameter 0 of modifyResource
+cannot prove canModify on parameter 0 of modifyResource

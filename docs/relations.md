@@ -29,7 +29,7 @@ func ModifyResource(a AuthCtx) {
 func handler(s Session, u User, r Resource) {
     a := AuthCtx{S: s, U: u, R: r}
     if CanModify(a) {
-        ModifyResource(a) // discharged
+        ModifyResource(a) // CanModify(a) is proven; call accepted
     }
 }
 ```

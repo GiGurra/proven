@@ -3,7 +3,7 @@
 [![CI Status](https://github.com/GiGurra/proven/actions/workflows/ci.yml/badge.svg)](https://github.com/GiGurra/proven/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/GiGurra/proven)](https://goreportcard.com/report/github.com/GiGurra/proven)
 
-Compile-time contracts for Go. Declare what must hold inside a function body using plain `func(T) bool` predicates; the preprocessor walks the call graph at build time, discharges obligations it can prove, and fails the build on the ones it can't.
+Compile-time contracts for Go. Declare what must hold inside a function body using plain `func(T) bool` predicates; the preprocessor walks the call graph at build time, accepts every call whose preconditions it can prove, and fails the build on the ones it can't.
 
 ```go
 // Declare a precondition inside the function body:
@@ -36,7 +36,7 @@ func DefaultUserID() int {
     return trust.Returns(42, isPositive) // programmer: "42 is obviously positive"
 }
 
-// Declare an implication once; the preprocessor uses it to discharge obligations:
+// Declare an implication once; the preprocessor uses it to prove preconditions:
 var _ = infer.From(isSmallPositive).To(isPositive)
 
 // Boundary validators establish facts on raw input:
@@ -45,7 +45,7 @@ var _ = infer.From(isSmallPositive).To(isPositive)
 // - trust.That(raw, pred) skips the runtime check (programmer's word)
 
 // Put it together: validate once at the boundary, then every
-// downstream precondition discharges at compile time.
+// downstream precondition is proven at compile time.
 func main() {
     amount, err := prove.That(readAmount(), isPositive)
     if err != nil {
@@ -68,7 +68,7 @@ Signatures stay plain Go. Predicates are ordinary functions. No wrapper types, n
 
 Systems grow. Past a certain size it becomes effectively impossible to remember what invariants were imposed where, or why. Engineers re-validate defensively, trust assumptions that have drifted, or simply forget to check. The cost is runtime bugs, redundant validation at every layer, and a maintenance burden that scales faster than the codebase.
 
-A `proven.That(x, isPositive)` at the top of a function body does two jobs at once. It's **documentation** the reader can't miss — the function's requirements live in its body, not in a comment that may have drifted from reality. And it's a **check** the compiler runs at every call site, at build time, at zero runtime cost once discharged. A predicate written once is enforced everywhere the function is called, for as long as it stays declared.
+A `proven.That(x, isPositive)` at the top of a function body does two jobs at once. It's **documentation** the reader can't miss — the function's requirements live in its body, not in a comment that may have drifted from reality. And it's a **check** the compiler runs at every call site, at build time, at zero runtime cost once the proof is established. A predicate written once is enforced everywhere the function is called, for as long as it stays declared.
 
 Proven shifts that burden onto the compiler. A function declares once what must hold; the preprocessor proves it at every call site. If the proof succeeds, nothing runs at runtime. If any path can't be proved, the build fails with a diagnostic pointing at the offending call site.
 
