@@ -6,7 +6,7 @@
 
 **Linker gate via `atCompileTime`.** `proven.That` / `Returns` wrap their checks in a package-private `atCompileTime(func(){ ... })` helper. `atCompileTime` is declared via `//go:linkname` to an external symbol `_proven_atCompileTime` with no Go body. `gopls` and `go vet` see ordinary Go — IDE experience is always green. But `go build` / `go test` of any main or test target refuses to link without the preprocessor (which supplies the missing symbol during the toolexec pass). This is deliberate: forgetting the preprocessor is a loud link failure, never a silent loss of static checking.
 
-**Repo-local test stub.** `example/basic/linkstub_test.go` provides the `_proven_atCompileTime` symbol for this repo's own tests only, via a `*_test.go` file (so it is *not* linked into production builds). Downstream users adopting proven before the preprocessor ships would need an equivalent stub in their own test trees; production code always requires the preprocessor.
+**Test stub via `proventest`.** `pkg/proventest/` supplies the `_proven_atCompileTime` symbol for test binaries. Test files import `proventest` (it's always a test-time-only import — production code never pulls it in). In addition to satisfying the link, `proventest.WithChecks(fn)` flips a global flag that causes each `atCompileTime` block to execute its closure while `fn` runs, turning failing predicates into runtime panics. This lets tests verify that assertions are wired to the intended predicates — "Transfer(-5, ...) really does trip `isPositive`" — without needing the preprocessor. `example/basic/syntax_test.go` contains several `TestWiringVerification_*` tests using this pattern.
 
 ## Authoritative docs
 

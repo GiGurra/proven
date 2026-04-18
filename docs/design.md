@@ -30,7 +30,14 @@ The package's execution model is shaped by one strict goal: **the IDE experience
   Pure library builds (`go build ./...` on non-main packages) still produce `.a` archives, but any downstream binary refuses to link.
 - **With the preprocessor** (`GOFLAGS="-toolexec=proven"`), the toolexec pass injects the symbol, runs the static discharge, erases proven call sites whose obligations are discharged, and fails the build when they are not.
 
-Inside an `atCompileTime` block, the code is material the preprocessor reads; it never executes at runtime. `That`'s block contains a loop evaluating each predicate (`_ = pred(v)`) purely as a structural hint for the reader. There is no runtime panic path, no runtime cost; the runtime bodies are wholly inert on any path that reaches them (and in a correctly built binary, no path does).
+Inside an `atCompileTime` block, the code is material the preprocessor reads. In production builds the block never executes — the preprocessor has either erased the call site or substituted a compile error. In the default test configuration (via `proventest` — see below) the block is also a no-op, so runtime cost is zero.
+
+Tests can opt into running the block at runtime for wiring verification. `proventest.WithChecks(fn)` flips a flag for the duration of `fn`; inside that window, each `atCompileTime` block actually executes its closure, and a failing predicate panics. This lets tests assert "passing a negative amount to `Transfer` really does trip the precondition", catching drift between assertion and implementation without needing the preprocessor to be built yet.
+
+## Package layout
+
+- `pkg/proven/` — the public API: `That`, `Returns`, `All`, `Any`, `Not`.
+- `pkg/proventest/` — test-only support: supplies the `_proven_atCompileTime` symbol (so test binaries link without the preprocessor) and exposes `WithChecks(fn func())` for opt-in runtime verification. Never imported from production code.
 
 ## The API surface
 

@@ -23,6 +23,8 @@ The function signature stays pure Go — no wrapper types, no type parameters, n
 
 **Under the preprocessor**, call sites are discharged by flow-sensitive analysis (literals, preceding checks, early-return guards, postconditions on return values). Discharged calls are erased; undischarged calls fail the build with a diagnostic.
 
+**Wiring verification in tests.** The sibling package `pkg/proventest` supplies the link symbol for test binaries and exposes `proventest.WithChecks(fn)`. Inside that call, `proven.That` / `proven.Returns` blocks execute at runtime, so a failing predicate panics — letting you assert that the right predicate is actually wired to the right parameter.
+
 The goal: **stop forgetting to validate incoming data**, and stop repeating the same validation at every layer once you have.
 
 ## Status

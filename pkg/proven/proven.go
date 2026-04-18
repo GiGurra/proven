@@ -1,6 +1,10 @@
 package proven
 
-import _ "unsafe" // for //go:linkname
+import (
+	"fmt"
+
+	_ "unsafe" // for //go:linkname
+)
 
 // atCompileTime marks a block that the proven preprocessor discharges
 // statically at every call site of the enclosing function. Under the
@@ -29,13 +33,19 @@ func atCompileTime(_ func())
 // must prove each predicate for the corresponding argument; the That
 // call is then erased. Unprovable call sites fail the build.
 //
-// The block passed to atCompileTime describes, in plain Go, what the
-// preprocessor must verify: for each predicate, pred(v) must hold. The
-// block is never executed at runtime.
+// The block passed to atCompileTime states what must hold: for each
+// predicate, pred(v) is true. The block does NOT run at runtime in
+// production builds (the default atCompileTime is a no-op); it is
+// consumed statically by the preprocessor. Tests may opt in to having
+// the block execute at runtime via proventest.WithChecks, turning a
+// failing predicate into a panic — useful for verifying that the
+// precondition is wired to the intended predicate.
 func That[T any](v T, preds ...func(T) bool) {
 	atCompileTime(func() {
 		for _, pred := range preds {
-			_ = pred(v) // each predicate must hold on v
+			if !pred(v) {
+				panic(fmt.Sprintf("proven.That: precondition violated on %v", v))
+			}
 		}
 	})
 }
@@ -44,10 +54,15 @@ func That[T any](v T, preds ...func(T) bool) {
 // value. Returns the value unchanged. Callers receive the fact that
 // every predicate holds on the returned value, available to the
 // preprocessor for discharging downstream obligations without re-proof.
+//
+// Runtime semantics match That: the block does not execute in
+// production builds; tests can opt in via proventest.WithChecks.
 func Returns[T any](v T, preds ...func(T) bool) T {
 	atCompileTime(func() {
 		for _, pred := range preds {
-			_ = pred(v) // each predicate must hold on the returned v
+			if !pred(v) {
+				panic(fmt.Sprintf("proven.Returns: postcondition violated on %v", v))
+			}
 		}
 	})
 	return v
