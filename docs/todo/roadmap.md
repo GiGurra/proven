@@ -12,23 +12,13 @@ This is the resume-point for preprocessor work: what's done, what's next, and wh
 - `internal/preprocessor/`: AST-based preprocessor (`run.go` / `compile.go` / `provenstub.go`) + unit tests + golden-file e2e harness (`e2e_test.go`) running the real Go toolchain on fixtures under `testdata/cases/`, with an isolated `GOCACHE` per test run.
 - Fixtures: `noop_ok`, `basic_proven_use_links_ok`.
 - **Phase 1 (stub injection).** Any program using `proven.That` links under `-toolexec=proven`. The preprocessor detects `compile` invocations for `github.com/GiGurra/proven/pkg/proven`, parses the source files the compiler received, finds the `//go:linkname` declaration for `_proven_atCompileTime`, derives the stub's signature from the matched `FuncType`, writes a companion `.go` file to `$TMPDIR`, and appends it to the compile argv.
+- **Phase 2 (per-package obligation scan).** `internal/preprocessor/scanner.go` builds an in-memory `PackageSummary`: for every `FuncDecl` whose body contains a `proven.That` or `proven.Returns` call on a direct parameter reference, record the parameter position → predicate list mapping (and a bag of return-postcondition predicates). Predicates are normalized as `Predicate{Pkg, Name}`, same-package references keyed by the scanned import path. Handles aliased proven imports, receiver-qualified method names, and silently skips unresolvable predicate expressions (inline combinators, function literals, arbitrary expressions) per the v1 scope in `docs/design.md`. Not yet wired into the compile path — Phase 3 will consume it at call sites.
 
 **Not done.** Everything below is open work.
 
 ## Phases
 
 Roughly sequential — each phase relies on the previous — but the harness tolerates incremental progress: add a fixture for a behavior, go red, implement until it's green.
-
-### Phase 2 — Per-package obligation scan
-
-**Goal.** For every `.go` source file being compiled, discover which functions declare preconditions (`proven.That`) / postconditions (`proven.Returns`) and with which predicates.
-
-- Parse source via `go/parser`.
-- Walk AST for `proven.That(arg, preds...)` and `proven.Returns(arg, preds...)`.
-- Build a per-function summary: `paramIndex -> []predicateIdent`.
-- In-memory data structure for now; Phase 6 persists it across packages.
-
-**Fixtures.** Internal scanner unit tests in `internal/preprocessor/scanner_test.go`. No user-visible fixture yet.
 
 ### Phase 3 — Flow-sensitive discharge (caller side)
 
