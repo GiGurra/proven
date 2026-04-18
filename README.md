@@ -43,13 +43,25 @@ func DefaultUserID() int {
 // Declare an implication once; the preprocessor uses it to discharge obligations:
 var _ = infer.From(isSmallPositive).To(isPositive)
 
-// Boundary-validate external data and carry the proof forward:
-v, err := prove.That(raw, isPositive)     // runtime check, returns error
-v := prove.Must(raw, isPositive)          // runtime check, panics on fail
-v := trust.That(raw, isPositive)          // no runtime check — programmer takes responsibility
+// Boundary validators establish facts on raw input:
+// - prove.That(raw, pred) returns an error (handler path)
+// - prove.Must(raw, pred) panics on failure (startup path)
+// - trust.That(raw, pred) skips the runtime check (programmer's word)
 
-// Property-test an inference rule on sample inputs:
-infertest.Verify(t, myRule, 1, 5, 99, -3, 0)
+// Put it together: validate once at the boundary, then every
+// downstream precondition discharges at compile time.
+func main() {
+    amount, err := prove.That(readAmount(), isPositive)
+    if err != nil {
+        log.Fatal(err)
+    }
+    note := trust.That("hello", isNonEmpty, maxLen280)
+
+    if err := Transfer(amount, note); err != nil {
+        log.Fatal(err)
+    }
+    _ = Clamp(Normalize(amount)) // isPositive flows through the nested chain
+}
 ```
 
 Signatures stay plain Go. Predicates are ordinary `func(T) bool`. No wrapper types, no generics ceremony, no struct decorations, no codegen. `gopls` and `go vet` see ordinary code, so IDE checking stays green — but building without the preprocessor fails loudly at link time, so you cannot silently ship code that bypasses the contract system.
