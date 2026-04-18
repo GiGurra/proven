@@ -74,46 +74,31 @@ func TestEarlyReturnGuards(t *testing.T) {
 // proventest.WithChecks, which executes the atCompileTime blocks at
 // runtime so a failing predicate panics.
 
-// 6. Verification via WithChecks: ensure Transfer really does refuse a
-// negative amount when the check is forced to run.
-func TestWiringVerification_TransferRejectsNegativeAmount(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic under WithChecks")
-		}
-	}()
-	proventest.WithChecks(func() {
+// 6. Wiring verification: Transfer's amount precondition is isPositive.
+// FailsWith runs the body under WithChecks and asserts that the named
+// predicate is the one that fires.
+func TestWiring_TransferAmountIsPositive(t *testing.T) {
+	proventest.FailsWith(t, isPositive, func() {
 		_ = Transfer(-5, "hi", "USD")
 	})
 }
 
-// 7. Verification via WithChecks: ensure Transfer refuses an empty note.
-func TestWiringVerification_TransferRejectsEmptyNote(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic under WithChecks")
-		}
-	}()
-	proventest.WithChecks(func() {
+// 7. Wiring verification: Transfer's note precondition includes isNonEmpty.
+func TestWiring_TransferNoteIsNonEmpty(t *testing.T) {
+	proventest.FailsWith(t, isNonEmpty, func() {
 		_ = Transfer(10, "", "USD")
 	})
 }
 
-// 8. Verification via WithChecks: Returns postcondition panics on a
-// value that fails the stated predicate.
-func TestWiringVerification_ReturnsRejectsBadPostcondition(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic under WithChecks")
-		}
-	}()
-	proventest.WithChecks(func() {
+// 8. Wiring verification: Returns postcondition on FindUserID is isPositive.
+func TestWiring_ReturnsPostconditionIsPositive(t *testing.T) {
+	proventest.FailsWith(t, isPositive, func() {
 		_ = proven.Returns(-1, isPositive)
 	})
 }
 
 // 9. Valid inputs do NOT panic even with checks enabled.
-func TestWiringVerification_ValidInputsPassUnderWithChecks(t *testing.T) {
+func TestWiring_ValidInputsPassUnderWithChecks(t *testing.T) {
 	proventest.WithChecks(func() {
 		if err := Transfer(100, "hello", "USD"); err != nil {
 			t.Fatal(err)

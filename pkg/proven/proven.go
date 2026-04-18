@@ -2,9 +2,44 @@ package proven
 
 import (
 	"fmt"
+	"reflect"
+	"runtime"
 
 	_ "unsafe" // for //go:linkname
 )
+
+// Violation is the panic value produced by a failing predicate inside
+// a proven.That or proven.Returns block. It is only raised when the
+// atCompileTime block is executed at runtime — i.e. under
+// proventest.WithChecks; production builds never reach this path.
+//
+// Tests can recover() a Violation and inspect which predicate failed
+// on which value.
+type Violation struct {
+	Predicate any // the func(T) bool that failed
+	Value     any // the value that failed the predicate
+}
+
+func (v Violation) Error() string {
+	return fmt.Sprintf("proven: predicate %s failed on %v", PredicateName(v.Predicate), v.Value)
+}
+
+// PredicateName returns the fully qualified Go name of a predicate
+// function value, or "<unknown>" if the value is not a function or the
+// runtime cannot resolve it. Intended for diagnostics and test helpers.
+func PredicateName(fn any) string {
+	if fn == nil {
+		return "<nil>"
+	}
+	v := reflect.ValueOf(fn)
+	if v.Kind() != reflect.Func {
+		return "<not-a-function>"
+	}
+	if f := runtime.FuncForPC(v.Pointer()); f != nil {
+		return f.Name()
+	}
+	return "<unknown>"
+}
 
 // atCompileTime marks a block that the proven preprocessor discharges
 // statically at every call site of the enclosing function. Under the
@@ -44,7 +79,7 @@ func That[T any](v T, preds ...func(T) bool) {
 	atCompileTime(func() {
 		for _, pred := range preds {
 			if !pred(v) {
-				panic(fmt.Sprintf("proven.That: precondition violated on %v", v))
+				panic(Violation{Predicate: pred, Value: v})
 			}
 		}
 	})
@@ -61,7 +96,7 @@ func Returns[T any](v T, preds ...func(T) bool) T {
 	atCompileTime(func() {
 		for _, pred := range preds {
 			if !pred(v) {
-				panic(fmt.Sprintf("proven.Returns: postcondition violated on %v", v))
+				panic(Violation{Predicate: pred, Value: v})
 			}
 		}
 	})
