@@ -705,9 +705,104 @@ func (a *analyzer) walkCalls(expr ast.Expr) {
 		if call, ok := n.(*ast.CallExpr); ok {
 			a.recordCallDischarge(call)
 			a.verifyProvenReturns(call)
+			a.verifyProvenThat(call)
 			a.plantFromInlineFactCall(call)
 		}
 		return true
+	})
+}
+
+// verifyProvenThat is the in-body compile-time assertion pass. Every
+// proven.That call — parameter subject or local subject, bare
+// identifier or identifier-rooted selector chain — is treated
+// uniformly: at its source position the analyzer emits a Query and
+// checks that each predicate holds on the subject's canonical key.
+//
+// Parameter subjects are the common happy case: the scanner recorded
+// the precondition, seedEventsFromPreconditions planted the seed at
+// function entry, and the backward walk finds it silently. Local
+// subjects have no seed — the programmer is asserting that at THIS
+// program point, some prior guard / prove.Must / trust.That has
+// established the predicate. If the backward walk finds no source,
+// the analyzer diagnoses it instead of silently trusting the claim.
+//
+// Test files (foo_test.go) skip this pass so proventest.AssertFails
+// style wiring tests can exercise deliberately-unproven inputs.
+// Lenient mode (no diagnostic sink) skips it too so unit tests that
+// construct analyzers directly without a diagnostic channel keep
+// working unchanged.
+func (a *analyzer) verifyProvenThat(call *ast.CallExpr) {
+	if a.provenAlias == "" {
+		return
+	}
+	if !isSel(call, a.provenAlias, "That") {
+		return
+	}
+	if len(call.Args) < 2 {
+		return
+	}
+	if a.diags == nil || a.fset == nil {
+		return
+	}
+	if pos := a.fset.Position(call.Pos()); isTestFile(pos.Filename) {
+		return
+	}
+	subjectKey, ok := exprKey(call.Args[0], a.imp)
+	if !ok {
+		return
+	}
+	queryPos := call.Args[0].Pos()
+	for _, arg := range call.Args[1:] {
+		// Pass nil diags — the scanner already reported any
+		// unresolvable predicate identities; avoid double-reporting.
+		leaves, ors, ok := resolveAndFlat(arg, a.imp, a.summary.ImportPath, nil, nil, "")
+		if !ok {
+			continue
+		}
+		for _, p := range leaves {
+			a.rec.queryLeaf(queryPos, p, subjectKey, -1, -1)
+			if !a.discharged(p, subjectKey) {
+				reportUnprovenAssert(a.diags, a.fset, call, p, subjectKey, a.summary.ImportPath)
+			}
+		}
+		for _, alts := range ors {
+			a.rec.queryOr(queryPos, alts, subjectKey, -1, -1)
+			if !a.dischargedOr(alts, subjectKey) {
+				reportUnprovenAssertOr(a.diags, a.fset, call, alts, subjectKey, a.summary.ImportPath)
+			}
+		}
+	}
+}
+
+// reportUnprovenAssert emits a diagnostic when a proven.That
+// assertion's predicate has no source in scope at the call site.
+// Shape mirrors the callee-precondition diagnostic so users see a
+// consistent message family.
+func reportUnprovenAssert(diags *[]Diagnostic, fset *token.FileSet, call *ast.CallExpr, pred Predicate, subject, currentPkg string) {
+	pos := fset.Position(call.Pos())
+	*diags = append(*diags, Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg: fmt.Sprintf(
+			"proven: cannot prove %s on %s (proven.That assertion)",
+			predicateLabelFor(pred, currentPkg), subject,
+		),
+	})
+}
+
+// reportUnprovenAssertOr emits the disjunctive-obligation variant of
+// the proven.That assertion diagnostic.
+func reportUnprovenAssertOr(diags *[]Diagnostic, fset *token.FileSet, call *ast.CallExpr, alts []Predicate, subject, currentPkg string) {
+	pos := fset.Position(call.Pos())
+	*diags = append(*diags, Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg: fmt.Sprintf(
+			"proven: cannot prove proven.Or(%s) on %s (proven.That assertion)",
+			altsLabel(alts, currentPkg), subject,
+		),
 	})
 }
 
@@ -793,7 +888,7 @@ func (a *analyzer) verifyProvenReturns(call *ast.CallExpr) {
 			return
 		}
 	}
-	valueID, ok := call.Args[0].(*ast.Ident)
+	subjectKey, ok := exprKey(call.Args[0], a.imp)
 	if !ok {
 		reportBadReturnsValue(a.diags, a.fset, call.Args[0], "literal or expression")
 		return
@@ -816,15 +911,15 @@ func (a *analyzer) verifyProvenReturns(call *ast.CallExpr) {
 		for _, pred := range leaves {
 			// Emit a query event before checking so the resolver
 			// can anchor its backward walk to the current scope.
-			a.rec.queryLeaf(call.Pos(), pred, valueID.Name, -1, -1)
-			if !a.discharged(pred, valueID.Name) {
-				reportUnprovenReturns(a.diags, a.fset, call, pred, valueID.Name, a.summary.ImportPath)
+			a.rec.queryLeaf(call.Pos(), pred, subjectKey, -1, -1)
+			if !a.discharged(pred, subjectKey) {
+				reportUnprovenReturns(a.diags, a.fset, call, pred, subjectKey, a.summary.ImportPath)
 			}
 		}
 		for _, alts := range ors {
-			a.rec.queryOr(call.Pos(), alts, valueID.Name, -1, -1)
-			if !a.dischargedOr(alts, valueID.Name) {
-				reportUnprovenReturnsOr(a.diags, a.fset, call, alts, valueID.Name, a.summary.ImportPath)
+			a.rec.queryOr(call.Pos(), alts, subjectKey, -1, -1)
+			if !a.dischargedOr(alts, subjectKey) {
+				reportUnprovenReturnsOr(a.diags, a.fset, call, alts, subjectKey, a.summary.ImportPath)
 			}
 		}
 	}

@@ -400,7 +400,7 @@ func reportBadSubject(diags *[]Diagnostic, fset *token.FileSet, expr ast.Expr, r
 		Line: pos.Line,
 		Col:  pos.Column,
 		Msg: fmt.Sprintf(
-			"proven: %s must be a parameter identifier — computed subjects and non-parameter variables are not supported in v1",
+			"proven: %s must be a trackable subject (identifier or identifier-rooted selector chain); computed expressions like arithmetic, index, dereference, and function-call results have no fact identity the analyzer can reason about",
 			role,
 		),
 	})
@@ -516,40 +516,67 @@ func matchProvenCall(call *ast.CallExpr, provenAlias string) (string, bool) {
 	return "", false
 }
 
-// recordThat handles a matched proven.That call. The first
-// argument must be a direct identifier naming a parameter of the
-// enclosing function; a non-identifier subject or an identifier
-// that isn't a parameter is a strict-mode error (complex subjects
-// are v2 scope and cannot be tracked across call sites). Each
-// subsequent argument must resolve to a named predicate; function
-// literals, inline combinators, and other expressions fail the
-// build rather than being silently dropped.
+// recordThat handles a matched proven.That call. Two subject roles
+// exist:
+//
+//   - Parameter identifier — declares a precondition that every
+//     caller of the enclosing function must discharge. The summary
+//     records it in ParamPreds / ParamOrs and seeds it as a fact at
+//     function entry.
+//   - Any other trackable subject (local identifier, or an
+//     identifier-rooted selector chain like "holder.Value") —
+//     declares a local compile-time assertion to be verified at the
+//     call site's program point against facts in scope. No caller
+//     obligation; the analyzer walks the body, emits a query at the
+//     call site, and diagnoses undischarged preds directly.
+//
+// Non-trackable subjects (computed expressions, function-call
+// results, index expressions) still fail strict mode — there is no
+// fact identity the analyzer can reason about across statements.
+//
+// Each subsequent argument must resolve to a named predicate;
+// function literals, inline combinators, and other expressions fail
+// the build rather than being silently dropped. The predicate
+// resolution step runs regardless of subject role so strict checks
+// fire consistently.
 func recordThat(s *FuncSummary, paramIdx map[string]int, call *ast.CallExpr, imp *importInfo, importPath string, fset *token.FileSet, diags *[]Diagnostic) {
 	if len(call.Args) < 2 {
 		return
 	}
-	id, ok := call.Args[0].(*ast.Ident)
-	if !ok {
+	if _, trackable := exprKey(call.Args[0], imp); !trackable {
 		reportBadSubject(diags, fset, call.Args[0], "first argument to proven.That")
 		return
 	}
-	idx, ok := paramIdx[id.Name]
-	if !ok {
-		reportBadSubject(diags, fset, call.Args[0], "first argument to proven.That")
-		return
-	}
+	// Resolve predicate args under strict checks regardless of
+	// subject role; the analyzer needs a clean leaf list for local
+	// assertions and callers need it for preconditions.
+	var leaves []Predicate
+	var ors [][]Predicate
 	for _, arg := range call.Args[1:] {
-		leaves, ors, ok := resolveAndFlat(arg, imp, importPath, fset, diags, "argument to proven.That")
+		argLeaves, argOrs, ok := resolveAndFlat(arg, imp, importPath, fset, diags, "argument to proven.That")
 		if !ok {
 			continue
 		}
-		s.ParamPreds[idx] = append(s.ParamPreds[idx], leaves...)
-		if len(ors) > 0 {
-			if s.ParamOrs == nil {
-				s.ParamOrs = make(map[int][][]Predicate)
-			}
-			s.ParamOrs[idx] = append(s.ParamOrs[idx], ors...)
+		leaves = append(leaves, argLeaves...)
+		ors = append(ors, argOrs...)
+	}
+	// Parameter subject → precondition. Non-parameter or
+	// selector-path subject → handled by the analyzer as a local
+	// assertion; the scanner does not record it in the summary.
+	id, isIdent := call.Args[0].(*ast.Ident)
+	if !isIdent {
+		return
+	}
+	idx, isParam := paramIdx[id.Name]
+	if !isParam {
+		return
+	}
+	s.ParamPreds[idx] = append(s.ParamPreds[idx], leaves...)
+	if len(ors) > 0 {
+		if s.ParamOrs == nil {
+			s.ParamOrs = make(map[int][][]Predicate)
 		}
+		s.ParamOrs[idx] = append(s.ParamOrs[idx], ors...)
 	}
 }
 

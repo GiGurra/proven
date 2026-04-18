@@ -114,12 +114,15 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	// that import it pick up the implications via the Phase 6
 	// sidecar-lookup path.
 	//
-	// Packages that import prove or trust also keep the analyzer
-	// running even without their own obligations: that's where the
-	// strict-mode diagnostics for loose lambdas at prove.That /
-	// prove.Must / trust.That sites fire. Short-circuiting here
-	// would silently bypass those checks.
-	if len(sum.Funcs) == 0 && len(sum.Rules) == 0 && len(imports) == 0 && !anyFileImportsProveOrTrust(files) {
+	// Packages that import proven, prove, or trust also keep the
+	// analyzer running even without their own obligations: that's
+	// where strict-mode diagnostics for loose lambdas at
+	// prove.That / prove.Must / trust.That sites fire, and also
+	// where the analyzer verifies local proven.That assertions
+	// (proven.That on any trackable subject, not just parameters —
+	// the unproven-assertion diagnostic fires from there).
+	// Short-circuiting here would silently bypass those checks.
+	if len(sum.Funcs) == 0 && len(sum.Rules) == 0 && len(imports) == 0 && !anyFileImportsFactPackage(files) {
 		return nil, nil
 	}
 
@@ -173,16 +176,19 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	return rewritePlan(toolArgs, sources, files, fset)
 }
 
-// anyFileImportsProveOrTrust reports whether any file in the
-// package imports the prove or trust runtime package. The analyzer
-// must run on these packages even when they have no obligations or
-// imports-with-obligations of their own: prove.That / prove.Must /
-// trust.That call sites are checked in strict mode for
-// unresolvable predicate arguments (lambdas, inline expressions),
-// and short-circuiting here would silently skip those checks.
-func anyFileImportsProveOrTrust(files []*ast.File) bool {
+// anyFileImportsFactPackage reports whether any file in the package
+// imports a fact-bearing runtime package (proven, prove, or trust).
+// The analyzer must run on these packages even when no obligations
+// were recorded in the summary: local proven.That assertions,
+// strict-mode rejections at prove/trust sites, and selector-path
+// subjects in any of those calls all fire from the analyzer path
+// and would be silently skipped otherwise.
+func anyFileImportsFactPackage(files []*ast.File) bool {
 	for _, f := range files {
 		imp := collectImports(f)
+		if imp.provenAlias != "" {
+			return true
+		}
 		if imp.aliasFor(proveImportPath) != "" || imp.aliasFor(trustImportPath) != "" {
 			return true
 		}
