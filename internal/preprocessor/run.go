@@ -30,9 +30,12 @@ import (
 // tool (compile, link, asm, ...), and the rest are the tool's own
 // arguments. Run returns the exit code to hand back to the OS.
 //
-// Behavior is opaque to the caller: any diagnostics go to the
-// supplied stderr, any synthesized sources live in temp dirs and are
-// cleaned up deferred.
+// The planner decides the effect of this invocation: forward
+// unchanged, forward with modified argv (Phase 1 stub injection),
+// or abort the build with one or more Go-standard diagnostics
+// (Phase 5, undischarged obligation). Diagnostics go to stderr in
+// the `file:line:col: message` layout cmd/compile uses so editors
+// and CI log scrapers handle them without special casing.
 func Run(args []string, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "proven: expected toolexec invocation (<tool-path> [args...])")
@@ -40,15 +43,23 @@ func Run(args []string, stderr io.Writer) int {
 	}
 
 	toolPath, toolArgs := args[0], args[1:]
-	extraSources, cleanup, err := planCompile(toolPath, toolArgs)
-	if cleanup != nil {
-		defer cleanup()
-	}
+	plan, err := planCompile(toolPath, toolArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "proven: %v\n", err)
 		return 1
 	}
-	toolArgs = append(toolArgs, extraSources...)
+	if plan != nil && plan.Cleanup != nil {
+		defer plan.Cleanup()
+	}
+	if plan != nil && len(plan.Diags) > 0 {
+		for _, d := range plan.Diags {
+			fmt.Fprintln(stderr, d)
+		}
+		return 1
+	}
+	if plan != nil && plan.NewArgs != nil {
+		toolArgs = plan.NewArgs
+	}
 
 	cmd := exec.Command(toolPath, toolArgs...)
 	cmd.Stdin = os.Stdin

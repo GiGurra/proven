@@ -148,9 +148,26 @@ type analyzer struct {
 // for short-lived analyses. The block-scoping that does matter —
 // facts introduced by an if-body — is handled inside analyzeIf
 // where the fact set is saved and restored.
+//
+// One pattern must be recognized across two consecutive
+// statements: the prove.That boundary idiom
+//
+//	v, err := prove.That(y, pred...)
+//	if err != nil { return ... }
+//
+// The fact that `pred` holds on v is only established once the
+// err-check guard has cleared the error path. Seeing the
+// assignment alone is not enough; tryProvePattern pairs the two
+// statements and plants facts in the right place.
 func (a *analyzer) analyzeBlock(block *ast.BlockStmt) {
-	for _, stmt := range block.List {
-		a.analyzeStmt(stmt)
+	i := 0
+	for i < len(block.List) {
+		if i+1 < len(block.List) && a.tryProvePattern(block.List[i], block.List[i+1]) {
+			i += 2
+			continue
+		}
+		a.analyzeStmt(block.List[i])
+		i++
 	}
 }
 
@@ -534,31 +551,15 @@ func (a *analyzer) applyAssignPostconditions(s *ast.AssignStmt) {
 			}
 		}
 	}
-	// prove.That(v, pred...) — conditional on err == nil. The
-	// guard that establishes the fact is the following if-stmt,
-	// handled by analyzeIf via its escape detection plus the
-	// pending-prove-that tracking below. For v1 we emit the
-	// fact on the value LHS immediately and rely on the test
-	// fixtures to include the err-check guard — a correct
-	// caller always pairs the two. The preprocessor errs toward
-	// over-claiming here; Phase 5's rewriter will only act when
-	// the enclosing analysis produces no Missing entries, so a
-	// forgotten err-check manifests as a runtime failure rather
-	// than a silent misdischarge.
-	//
-	// A stricter implementation would require the analyzer to
-	// see the err-check before emitting the fact; recorded as a
-	// known limitation in roadmap risks and left for a follow-up.
-	if a.isProveCall(call, "That") {
-		preds := a.proveCallPredicates(call)
-		if len(s.Lhs) >= 1 {
-			if id, ok := s.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
-				for _, p := range preds {
-					a.facts.Add(Fact{Pred: p, Var: id.Name})
-				}
-			}
-		}
-	}
+	// prove.That(v, preds...) is intentionally NOT handled here.
+	// Its postcondition only holds on the err == nil side of
+	// the subsequent err-check guard, which spans two
+	// statements. tryProvePattern in analyzeBlock owns that
+	// pairing and plants the facts when it sees a matching
+	// guard. An unpaired prove.That (no err-check following,
+	// or the err is discarded with `_`) deliberately produces
+	// no facts: the analyzer will not claim something the
+	// program has not actually checked.
 }
 
 // applyDeclPostconditions mirrors applyAssignPostconditions for
@@ -592,6 +593,193 @@ func (a *analyzer) applyDeclPostconditions(vs *ast.ValueSpec) {
 			}
 		}
 	}
+}
+
+// tryProvePattern recognizes a two-statement sequence of the form
+//
+//	v, err := prove.That(y, preds...)
+//	if err <op> nil { ... } [else { ... }]
+//
+// and plants the postcondition facts where the semantics of the
+// guard make them true:
+//
+//	op=!=  then-branch escapes → facts live after the if.
+//	op=!=  neither branch escapes → facts live in the else branch only.
+//	op===  then-branch gets facts; after the if, facts survive
+//	       only if the else branch always escapes.
+//
+// Returns true iff both statements were consumed; the caller
+// advances by two. Returns false without side-effects if the
+// assignment is not a prove.That call, the next statement is not
+// a matching err-check, or the err variable is the blank
+// identifier (nothing to correlate against).
+func (a *analyzer) tryProvePattern(assignStmt, guardStmt ast.Stmt) bool {
+	pa := a.detectProveAssign(assignStmt)
+	if pa == nil {
+		return false
+	}
+	ifStmt, ok := guardStmt.(*ast.IfStmt)
+	if !ok {
+		return false
+	}
+	cond := classifyErrCond(ifStmt.Cond, pa.errVar)
+	if cond == errCondUnknown {
+		return false
+	}
+
+	// Consume the assignment (walk RHS for nested calls). No
+	// facts are emitted here — applyAssignPostconditions no
+	// longer handles prove.That.
+	a.analyzeStmt(assignStmt)
+
+	saved := a.facts.Clone()
+	guardFacts := newFactSet()
+	collectGuardFacts(ifStmt.Cond, a.imp, a.summary.ImportPath, false, guardFacts)
+	negFacts := newFactSet()
+	collectGuardFacts(ifStmt.Cond, a.imp, a.summary.ImportPath, true, negFacts)
+
+	// Decide per branch whether prove facts apply.
+	thenHasProve := cond == errCondIsNil
+	elseHasProve := cond == errCondNotNil
+
+	// then-branch
+	a.facts = unionFacts(saved, guardFacts)
+	if thenHasProve {
+		for _, f := range pa.facts {
+			a.facts.Add(f)
+		}
+	}
+	a.analyzeBlock(ifStmt.Body)
+	thenEscapes := blockAlwaysEscapes(ifStmt.Body)
+
+	// else-branch (if any)
+	elseEscapes := false
+	if ifStmt.Else != nil {
+		a.facts = unionFacts(saved, negFacts)
+		if elseHasProve {
+			for _, f := range pa.facts {
+				a.facts.Add(f)
+			}
+		}
+		switch e := ifStmt.Else.(type) {
+		case *ast.BlockStmt:
+			a.analyzeBlock(e)
+			elseEscapes = blockAlwaysEscapes(e)
+		case *ast.IfStmt:
+			a.analyzeIf(e)
+		}
+	}
+
+	// After-if fact set:
+	//   - if the then-branch always escapes, the continuation
+	//     corresponds to the else-side, so elseHasProve decides.
+	//   - if the else-branch always escapes, the continuation
+	//     is the then-side, so thenHasProve decides.
+	//   - otherwise the control-flow merge is conservative and
+	//     prove facts are dropped.
+	switch {
+	case thenEscapes && !elseEscapes:
+		a.facts = unionFacts(saved, negFacts)
+		if elseHasProve {
+			for _, f := range pa.facts {
+				a.facts.Add(f)
+			}
+		}
+	case !thenEscapes && elseEscapes:
+		a.facts = unionFacts(saved, guardFacts)
+		if thenHasProve {
+			for _, f := range pa.facts {
+				a.facts.Add(f)
+			}
+		}
+	default:
+		a.facts = saved
+	}
+	return true
+}
+
+// proveAssign captures the essentials of a recognized
+// `v, err := prove.That(y, preds...)` assignment: the identifiers
+// bound to the value and the error, and the facts the pattern
+// implies on the err == nil side.
+type proveAssign struct {
+	errVar string
+	facts  []Fact
+}
+
+// detectProveAssign recognizes an assignment statement that binds
+// two identifiers (value, error) to a prove.That call and returns
+// the associated proveAssign. Blank identifiers disqualify the
+// pattern — there is nothing to pair the err-check against if the
+// caller discarded the error.
+func (a *analyzer) detectProveAssign(stmt ast.Stmt) *proveAssign {
+	as, ok := stmt.(*ast.AssignStmt)
+	if !ok || len(as.Lhs) != 2 || len(as.Rhs) != 1 {
+		return nil
+	}
+	valueID, ok := as.Lhs[0].(*ast.Ident)
+	if !ok || valueID.Name == "_" {
+		return nil
+	}
+	errID, ok := as.Lhs[1].(*ast.Ident)
+	if !ok || errID.Name == "_" {
+		return nil
+	}
+	call, ok := as.Rhs[0].(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	if !a.isProveCall(call, "That") {
+		return nil
+	}
+	preds := a.proveCallPredicates(call)
+	facts := make([]Fact, 0, len(preds))
+	for _, p := range preds {
+		facts = append(facts, Fact{Pred: p, Var: valueID.Name})
+	}
+	return &proveAssign{errVar: errID.Name, facts: facts}
+}
+
+type errCondKind int
+
+const (
+	errCondUnknown errCondKind = iota
+	errCondNotNil              // `err != nil`
+	errCondIsNil               // `err == nil`
+)
+
+// classifyErrCond inspects an if-condition for the canonical
+// err == nil / err != nil comparison against the given err
+// variable. Compound conditions (&& / || chains) are not
+// recognized at v1 — the idiom under analysis is always a simple
+// binary comparison.
+func classifyErrCond(cond ast.Expr, errVar string) errCondKind {
+	be, ok := cond.(*ast.BinaryExpr)
+	if !ok {
+		return errCondUnknown
+	}
+	matchesErr := isIdent(be.X, errVar) || isIdent(be.Y, errVar)
+	matchesNil := isNilIdent(be.X) || isNilIdent(be.Y)
+	if !matchesErr || !matchesNil {
+		return errCondUnknown
+	}
+	switch be.Op {
+	case token.NEQ:
+		return errCondNotNil
+	case token.EQL:
+		return errCondIsNil
+	}
+	return errCondUnknown
+}
+
+func isIdent(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+func isNilIdent(e ast.Expr) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == "nil"
 }
 
 // isProveCall reports whether call is `<proveAlias>.<which>(...)`.
@@ -650,9 +838,8 @@ func (imp *importInfo) aliasFor(importPath string) string {
 // analyzeSource parses a single source file, runs the Phase 2
 // scanner against it to build a summary, then walks every
 // FuncDecl and returns all call-site discharges. Convenience for
-// tests; production callers drive scanner and analyzer
-// separately because they need to aggregate summaries across
-// multiple files.
+// tests; production code uses AnalyzePackage which handles
+// multi-file packages in one pass.
 func analyzeSource(importPath, src string) ([]CallDischarge, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "input.go", src, 0)
@@ -672,6 +859,52 @@ func analyzeSource(importPath, src string) ([]CallDischarge, error) {
 		}
 	}
 	return all, nil
+}
+
+// AnalyzePackage parses each source file once, builds the package
+// summary (Phase 2), then walks every FuncDecl in every file and
+// collects the call-site discharges (Phase 3/4). Returns the
+// summary, the flat list of discharges across the package, and
+// the FileSet that owns the Pos values inside each discharge —
+// callers need the same fset to resolve Pos to (file, line, col)
+// for diagnostics.
+//
+// Short-circuits packages that need no analysis: if the scan
+// finds no obligations (summary.Funcs empty) the analyzer is
+// skipped entirely — no caller in the package can reference an
+// obligation that is not in summary.Funcs. This is the common
+// case for the many stdlib and non-proven-using user packages
+// that pass through the preprocessor on every build.
+func AnalyzePackage(importPath string, sources []string) (*PackageSummary, []CallDischarge, *token.FileSet, error) {
+	fset := token.NewFileSet()
+	sum := &PackageSummary{
+		ImportPath: importPath,
+		Funcs:      make(map[string]*FuncSummary),
+	}
+	files := make([]*ast.File, 0, len(sources))
+	for _, src := range sources {
+		f, err := parser.ParseFile(fset, src, nil, 0)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		files = append(files, f)
+	}
+	for _, f := range files {
+		scanFile(sum, importPath, f)
+	}
+	if len(sum.Funcs) == 0 {
+		return sum, nil, fset, nil
+	}
+	var all []CallDischarge
+	for _, f := range files {
+		imp := collectImports(f)
+		for _, decl := range f.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				all = append(all, AnalyzeFunc(fn, sum, imp)...)
+			}
+		}
+	}
+	return sum, all, fset, nil
 }
 
 // dischargeForCallee returns the discharge entry for the call to

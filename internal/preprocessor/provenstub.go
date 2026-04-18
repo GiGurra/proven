@@ -33,36 +33,57 @@ const provenPkgPath = "github.com/GiGurra/proven/pkg/proven"
 // pkg/proven, and therefore the symbol our stub must supply.
 const provenLinkSymbol = "_proven_atCompileTime"
 
-// planProvenStub walks the pkg/proven source files the compiler was
-// handed, finds the //go:linkname declaration binding a local func
-// to _proven_atCompileTime, and writes a temp Go file that provides
-// that symbol as a no-op. The returned path is appended to the
-// compile argv by the caller.
+// planProvenStub is the compile-plan wrapper for Phase 1 stub
+// injection. It extracts source files from toolArgs, delegates to
+// provenStubFromSources, and — when a stub is written — returns a
+// Plan whose NewArgs appends the stub path to the original argv.
+func planProvenStub(toolArgs []string) (*Plan, error) {
+	sources := compileSourceFiles(toolArgs)
+	stub, cleanup, err := provenStubFromSources(sources)
+	if err != nil {
+		return nil, err
+	}
+	if stub == "" {
+		return nil, nil
+	}
+	newArgs := append(append([]string(nil), toolArgs...), stub)
+	return &Plan{NewArgs: newArgs, Cleanup: cleanup}, nil
+}
+
+// provenStubFromSources walks the pkg/proven source files, finds
+// the //go:linkname declaration binding a local func to
+// _proven_atCompileTime, and writes a temp Go file that provides
+// that symbol as a no-op. Returns the temp file path plus a
+// cleanup closure.
 //
 // If no matching declaration is present the function returns
-// (nil, nil, nil) — the package in question is not what we expect,
-// and silently doing nothing leaves the link failing as it would
-// without the preprocessor, which is an intelligible failure mode.
-func planProvenStub(sources []string) ([]string, func(), error) {
+// ("", nil, nil) — the package in question does not look like our
+// pkg/proven, and silently doing nothing leaves the link failing
+// as it would without the preprocessor, which is an intelligible
+// failure mode.
+//
+// Exposed separately from planProvenStub so unit tests can feed
+// source paths directly without constructing a full compile argv.
+func provenStubFromSources(sources []string) (string, func(), error) {
 	fset := token.NewFileSet()
 	decl, err := findLinknameDecl(fset, sources, provenLinkSymbol)
 	if err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
 	if decl == nil {
-		return nil, nil, nil
+		return "", nil, nil
 	}
 
 	stub, err := renderStub(decl)
 	if err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
 
 	path, cleanup, err := writeTempGoFile("proven-stub-*.go", stub)
 	if err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
-	return []string{path}, cleanup, nil
+	return path, cleanup, nil
 }
 
 // linknameDecl captures the essentials of a //go:linkname-bound

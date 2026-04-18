@@ -41,18 +41,18 @@ func TestPlanProvenStub_FromRealSource(t *testing.T) {
 		t.Fatalf("no .go files under pkg/proven")
 	}
 
-	extras, cleanup, err := planProvenStub(sources)
+	stub, cleanup, err := provenStubFromSources(sources)
 	if cleanup != nil {
 		defer cleanup()
 	}
 	if err != nil {
-		t.Fatalf("planProvenStub: %v", err)
+		t.Fatalf("provenStubFromSources: %v", err)
 	}
-	if len(extras) != 1 {
-		t.Fatalf("want 1 extra source file, got %d: %v", len(extras), extras)
+	if stub == "" {
+		t.Fatal("expected a stub file, got empty path")
 	}
 
-	data, err := os.ReadFile(extras[0])
+	data, err := os.ReadFile(stub)
 	if err != nil {
 		t.Fatalf("read stub: %v", err)
 	}
@@ -86,14 +86,14 @@ func Foo() {}
 		t.Fatal(err)
 	}
 
-	extras, cleanup, err := planProvenStub([]string{path})
+	stub, cleanup, err := provenStubFromSources([]string{path})
 	if cleanup != nil {
 		defer cleanup()
 	}
 	if err != nil {
-		t.Fatalf("planProvenStub: %v", err)
+		t.Fatalf("provenStubFromSources: %v", err)
 	}
-	if extras != nil {
-		t.Errorf("expected no extras for unrelated package, got %v", extras)
+	if stub != "" {
+		t.Errorf("expected no stub for unrelated package, got %q", stub)
 	}
 }

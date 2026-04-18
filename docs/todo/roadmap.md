@@ -15,22 +15,22 @@ This is the resume-point for preprocessor work: what's done, what's next, and wh
 - **Phase 2 (per-package obligation scan).** `internal/preprocessor/scanner.go` builds an in-memory `PackageSummary`: for every `FuncDecl` whose body contains a `proven.That` or `proven.Returns` call on a direct parameter reference, record the parameter position → predicate list mapping (and a bag of return-postcondition predicates). Predicates are normalized as `Predicate{Pkg, Name}`, same-package references keyed by the scanned import path. Handles aliased proven imports, receiver-qualified method names, and silently skips unresolvable predicate expressions (inline combinators, function literals, arbitrary expressions) per the v1 scope in `docs/design.md`. Not yet wired into the compile path — Phase 3 consumes it at call sites.
 - **Phase 3 (flow-sensitive discharge).** `internal/preprocessor/analyzer.go` walks each caller `FuncDecl` under a mutable `FactSet`, producing one `CallDischarge` per call to a function whose key is in the package summary. Each discharge lists `ParamDischarge{Required, Missing}` so Phase 5 can erase when Missing is empty and diagnose otherwise. All five fact sources from the roadmap are supported: preceding `if pred(x)` narrowing, early-return / panic guard with `if !pred(x) { escape }`, conjoined `&&` guards, postconditions from assignments of `proven.Returns`-annotated callees, and successful `prove.That` / `prove.Must` calls. Branch merge logic recognizes a branch that always escapes via return or panic and keeps the surviving branch's facts. Scope is deliberately narrow — direct-identifier subjects only, same-package free-function callees only, no full dataflow merge across complex control flow. Not yet wired into the compile path; Phase 5 will do that.
 - **Phase 4 (inference-rule consumption).** Scanner harvests `var _ = infer.From(premise).[Given(context).]To(conclusion)` declarations into `PackageSummary.Rules` as `InferRule{From, Given *Predicate, To}` entries. Analyzer's discharge check falls back from direct fact lookup to backward-chaining through the rules: a required predicate on a variable is discharged if some rule concludes it, its From premise discharges (recursively), and its Given context (when present) also discharges on the same variable. Cycle-safe via a per-query visited set, so pathological mutual rules return false without recursing forever. Multi-hop chains and chains-through-Given both work.
+- **Phase 5a (wiring + diagnostics).** The scanner+analyzer are now wired into the compile path. `planCompile` returns a `Plan{NewArgs, Cleanup, Diags}` and `planUserPackage` scans+analyzes every package the toolchain compiles; when any call-site obligation is undischarged the preprocessor emits one Go-standard `file:line:col: proven: undischarged predicate ...` diagnostic per missing predicate per param and exits non-zero before the real compile runs. `AnalyzePackage` integrates the scan+analyze in one pass, parsing each source once. prove.That's err-check pairing is now correct: the fact set only adds the postcondition on the err==nil side of a matching `if err != nil {escape}` or `if err == nil {body}` guard; an unpaired prove.That (or blank-identifier err) no longer falsely discharges. e2e fixtures under `testdata/cases/`: `preceding_check_ok`, `early_return_guard_ok`, `returns_flow_ok`, `prove_then_proven_ok` (build), `unguarded_fails`, `prove_then_error_not_discharged_fails` (build fails with diagnostic substring match).
 
 **Not done.** Everything below is open work.
+
+### Phase 5b — Zero-cost rewriting (follow-on)
+
+**Goal.** Erase discharged `proven.That` / `proven.Returns` calls so the compiled binary has no residual closure allocation or function-call overhead at those sites.
+
+- Already-discharged call sites are no-ops at runtime today (the atCompileTime symbol is a no-op stub), but each still allocates a closure and makes a linkname-resolved call. Phase 5b removes the calls from the AST in the temp sources the preprocessor hands to the compiler.
+- `proven.That(x, preds...)` used as a statement: drop the ExprStmt.
+- `proven.Returns(v, preds...)` used as an expression: replace with `v`.
+- Preserve line/column information via `//line` directives so unrelated compile errors still point at the original source.
 
 ## Phases
 
 Roughly sequential — each phase relies on the previous — but the harness tolerates incremental progress: add a fixture for a behavior, go red, implement until it's green.
-
-### Phase 5 — Rewriting & diagnostics
-
-**Goal.** Turn discharge results into build outcomes.
-
-- Rewrite discharged `proven.That` / `proven.Returns` calls to no-ops, preserving line numbers.
-- Emit Go-standard `file:line:col: message` diagnostics for undischarged calls and exit non-zero.
-- Pass the modified source to the real compile tool; preserve position information for unrelated diagnostics.
-
-**Fixtures.** Add expected.txt content (diagnostic substring) for the previously-red `unguarded_fails` and similar fixtures.
 
 ### Phase 6 — Cross-package obligations
 
