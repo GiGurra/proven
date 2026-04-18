@@ -40,6 +40,14 @@ func Foo(x *int) {
 		return
 	}
 	NeedsNonNil(holder3.Value)
+
+	holder4 := PtrHolder{}
+	NeedsNonNil(ProvesNonNil(holder4.Value))
+}
+
+func ProvesNonNil[T any](t *T) *T {
+	prove.Must(t, proven.NonNil)
+	return t
 }
 
 func Foo2[T any](t T) {
