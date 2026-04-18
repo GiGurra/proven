@@ -22,15 +22,21 @@ func Foo() {
 		NeedsNonNil(x)
 	}
 
-	holder := PtrHolder{}
-	//if holder.Value != nil { // works
-	//prove.Must //works
-	_, err := prove.That(holder.Value, proven.NonNil)
+	holder1 := PtrHolder{}
+	if holder1.Value != nil { // works
+		NeedsNonNil(holder1.Value)
+	}
+
+	holder2 := PtrHolder{}
+	prove.Must(holder2.Value, proven.NonNil)
+	NeedsNonNil(holder2.Value)
+
+	holder3 := PtrHolder{}
+	_, err := prove.That(holder3.Value, proven.NonNil)
 	if err != nil {
 		return
 	}
-	NeedsNonNil(holder.Value)
-	//}
+	NeedsNonNil(holder3.Value)
 }
 
 func Foo2[T any](t T) {
