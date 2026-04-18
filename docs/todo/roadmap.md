@@ -23,6 +23,7 @@ This is the resume-point for preprocessor work: what's done, what's next, and wh
 - **Phase 8 (`infertest.Verify`).** New sibling package `pkg/infertest` exposes `Verify[T any](t infertest.TestingT, rule infer.Rule, samples ...T)` and a stricter `VerifyApplies[T any]` variant that additionally fails when every sample misses the premise. `infer.Rule` gained private `func(any) bool` wrappers over its premise, Given, and conclusion predicates (lifted by a generic `wrapAny[T]`), plus a `Check(sample any) bool` method and an `Applies(sample any) bool` method — the rule type stayed non-generic so the package-scope `var _ infer.Rule = infer.From(...).To(...)` surface remained unchanged. Verify uses a minimal `TestingT` interface (just `Helper` + `Errorf`) so tests can substitute a recording fake without `*testing.T`'s nominal identity getting in the way. Catches declared-but-false rules early: the classic `infer.From(isEven).To(isPositive)` counter-example at `-4` is caught by the test that declares it. Unit tests in `pkg/infertest/infertest_test.go` cover sound rules, unsound rules, Given-conditioned rules (both valid and invalid), vacuously-true sample sets (silently accepted by `Verify`, rejected by `VerifyApplies`), and partially-hitting sample sets.
 
 - **Auto-inferred postconditions + nested-call threading (done).** Every function advertises the intersection of leaf / Or facts on its returned identifier across all `ReturnStmt` sites — no `proven.Returns` needed in the common case. `FuncSummary` gains `DerivedReturnPreds` / `DerivedReturnOrs`; `returnFacts(sum)` merges explicit + derived for callers. Literal / non-identifier returns produce empty snapshots, collapsing the intersection so a function that sometimes returns `0` advertises nothing (sound). `bindArgForCheck` extends the reach by virtualizing nested-call arguments at the discharge check: when `call.Args[idx]` is itself an `*ast.CallExpr` with a resolvable callee, the analyzer clones its `FactSet`, plants the inner call's `returnFacts` on a synthetic `$argN` name, runs the normal discharge, and restores — so `target(callee.Forward(x))` discharges without an intermediate binding. Fixtures under `testdata/cases/`: `auto_inferred_returns_ok`, `auto_inferred_multi_return_ok`, `auto_inferred_literal_return_no_advertise_fails`, `auto_inferred_cross_package_ok`, `nested_call_explicit_returns_ok`, `nested_call_no_postcondition_fails`. Measured overhead on `benchmarks/corpus` (40 pkgs): clean ~1.95s, hot ~140ms — unchanged from pre-prototype baseline. Explicit `proven.Returns` stays as an opt-in contract anchor for API boundaries where the user wants the compiler to verify a specific advertised claim.
+- **Library predicates + compile-time literal evaluation (done).** `pkg/proven` ships `Positive`, `Negative`, `NonNegative`, `NonPositive`, `Zero`, `NonZero`, `Even`, `Odd`, `NonEmpty`, `Empty`, `NonNil`, `Nil` as ordinary generic predicates. `internal/preprocessor/litconst.go` evaluates them at build time on simple literal argument shapes: integer / float / string `BasicLit`, unary-minus on numeric literals, the `nil` identifier, `&T{...}`, `new(T)`, `make(...)`. Evaluation is wired into `bindArgForCheck` as a third path (after plain-identifier and nested-call), planting virtual facts for the predicates that hold on a synthetic `$argN` variable. `collectGuardFacts` also recognizes `x != nil` / `x == nil` with either operand order and plants `proven.NonNil` / `proven.Nil` with the right polarity, so `if u != nil`, `if u == nil { return }`, and the usual early-return patterns discharge `proven.NonNil` preconditions with no explicit predicate call. Scope is deliberately narrow — only library-included predicates, only simple argument shapes. Package-level Go `const` references and arbitrary compile-time expressions are not yet resolved; see Phase 12 below. Fixtures cover every predicate family plus the scope boundary (`user_pred_unknown_literal_fails` pins that user predicates do NOT get free literal evaluation).
 
 **Not done.** Everything below is open work.
 
@@ -109,6 +110,32 @@ Two sub-questions the design has to close (inline combinators are split out into
 - **Scope of use.** Even with identity, a lambda defined in file A can't realistically be discharged by a fact established in file B unless both reference the same declared identifier — so the practical scope is "lambdas used multiple times within one file, or assigned to a package-scope var before use." The latter is already the recommended workaround today (`var p = func(x int) bool { ... }; proven.That(v, p)`), which means it already works — a named var binding a function literal passes the Ident resolver. The real gap is single-use inline `proven.That(v, func(x int) bool { ... })` which the preprocessor never sees at any other site.
 
 Out of scope for Phase 11: closures that capture enclosing variables (their bodies reference non-parameter state; cross-call identity is essentially impossible), lambdas that change over time (redefined in different builds — their identity would shift, breaking cache coherence).
+
+### Phase 12 — Go `const` references in the literal evaluator
+
+**Goal.** Extend `litconst.go`'s compile-time evaluation so a caller can pass a Go `const` to a library-predicate-annotated function and have it accepted at build time, the same way a bare literal already is:
+
+```go
+const MaxUsers = 100
+const ServerName = "prod-01"
+
+target(MaxUsers)   // should accept — Positive(100) is true
+greet(ServerName)  // should accept — NonEmpty("prod-01") is true
+```
+
+Today `*ast.Ident` at an argument position falls through every evaluator path, so the build fails with `cannot prove`. The work is scoped in tiers, cheapest first:
+
+**Tier 1 — same-package, direct-literal consts (~80-120 lines).** Build a per-package `map[string]ast.Expr` of top-level `const` decls at scan time (they're already parsed; just walk `*ast.GenDecl` with `token.CONST`). Extend `asIntLit` / `asFloatLit` / `asStringLit` in `litconst.go` to resolve an `*ast.Ident` through the map and recurse (cycle-safe via a visited set). Handles the common `const Foo = 42` / `const Name = "prod"` idiom. Skips iota, arithmetic, and cross-package.
+
+**Tier 2 — same-package, full constant folding (~200-300 lines on top of Tier 1).** Use `go/constant` to evaluate arbitrary compile-time expressions: `const MaxBytes = 1 << 20`, `const Greeting = "hello, " + "world"`, `len("x")`. Handle iota by tracking each spec's index within its const group. Picks up idioms that Tier 1 misses.
+
+**Tier 3 — cross-package via sidecar (~100-200 lines on top of Tier 2).** Extract exported const values into the `PackageSummary` JSON sidecar and resolve `pkg.MaxUsers` at downstream compiles through the imported package's sidecar. Schema change (new `Consts map[string]ConstValue` field), new extraction pass in `ScanPackage`. Adds real value for library users whose APIs expose canonical constants.
+
+**Tier 4 — `go/types`-based resolution (non-trivial design work).** Load the package through `go/types` with a proper Importer that reads cached `.a` files for dependencies. Gets types, constant values, iota, and cross-package for free, and lays a foundation for type-sensitive checks we don't currently attempt (method set resolution for Phase 10, concrete type inference for generic predicates). But adds a dependency footprint, compile-time overhead, and design work to integrate cleanly with the toolexec flow. Rewire's patterns are the reference point.
+
+**Recommendation.** Start at Tier 1. It's the honest 80/20 — catches most real `const Foo = literal` idioms, stays consistent with the AST-only philosophy, and layers cleanly under Tier 2 / 3 if we want more later. Tier 4 should be evaluated against Phase 10 (methods as predicates), which also benefits from type info — if we're going to take that dependency, we might as well cash it in for both.
+
+**Start after.** A clear user pull. Today the workaround — inline the literal at the call site, or write a guard / `prove.Must` / `trust.That` for the const value — is cheap enough that this is not blocking anyone.
 
 ## Out of scope
 
