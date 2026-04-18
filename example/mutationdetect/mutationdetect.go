@@ -13,8 +13,11 @@ type PtrHolder struct {
 	Value *int
 }
 
-func Foo() {
-	x := new(1)
+// Foo takes x as a parameter so the `if x != nil` guard is not
+// statically decidable — staticcheck would flag `x := new(int); if
+// x != nil` as an always-true comparison, but the point of this
+// demo is to show the discharge path under a genuine nil guard.
+func Foo(x *int) {
 	if x != nil {
 		//MakeNil(&x) // makes it not compile
 		//x = nil // also makes it not compile
