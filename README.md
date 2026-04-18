@@ -2,7 +2,11 @@
 
 Compile-time contracts for Go, enforced via a `-toolexec` preprocessor.
 
-Validation in Go is discipline, not guarantee. Data flows through dozens of functions; invariants get validated at the edge (sometimes), re-validated defensively (sometimes), or silently assumed (usually). `proven` makes the assumptions explicit and has the compiler verify them: a function declares what must hold about its inputs, and every caller has to prove it at build time. If they can't, the build fails with a diagnostic pointing at the call site. If they can, nothing runs at runtime.
+Systems grow organically. Past a certain size it becomes effectively impossible to know what state a program is in when it reaches any given point in its call graph — or even remember why a particular requirement was imposed in the first place. Engineers re-validate defensively, trust invariants that may have drifted, or simply forget. The cost is runtime bugs, redundant validation at every layer, and a maintenance burden that scales faster than the codebase.
+
+`proven` shifts that burden onto the compiler. A function declares what must hold about its inputs or its program state; the preprocessor walks the entire call graph and proves that every path complies. If the proof succeeds, nothing runs at runtime. If any path can't be proved, the build fails with a diagnostic pointing at the offending call site.
+
+The point isn't to add more validation. It's to stop having to remember.
 
 Declare preconditions and postconditions inside function bodies using plain `func(T) bool` predicates:
 
