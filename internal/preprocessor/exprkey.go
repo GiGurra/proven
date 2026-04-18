@@ -41,6 +41,16 @@ func exprKey(e ast.Expr, imp *importInfo) (string, bool) {
 		if x.Name == "" || x.Name == "_" {
 			return "", false
 		}
+		// Predeclared constant identifiers are not trackable subjects:
+		// they carry a value but no name a fact can be established
+		// against. Rejecting them here keeps bindArgForCheck from
+		// short-circuiting into exprKey when a caller passes `nil`,
+		// `true`, or `false` — the literal evaluator handles those
+		// shapes instead, producing virtual facts where they apply.
+		switch x.Name {
+		case "nil", "true", "false", "iota":
+			return "", false
+		}
 		if imp != nil {
 			if _, isImport := imp.aliases[x.Name]; isImport {
 				return "", false

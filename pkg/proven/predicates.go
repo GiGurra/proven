@@ -40,11 +40,25 @@ func NonNegative[T Numeric](v T) bool { return v >= 0 }
 // NonPositive reports whether v is less than or equal to zero.
 func NonPositive[T Numeric](v T) bool { return v <= 0 }
 
-// Zero reports whether v equals zero.
-func Zero[T Numeric](v T) bool { return v == 0 }
+// Zero reports whether v equals its type's zero value. Works on
+// any comparable type: numerics (v == 0), strings (v == ""), bools
+// (v == false), pointers / channels / interfaces / funcs carrying
+// their nil form, arrays and structs whose fields are themselves
+// comparable. Slice, map, and func-holding struct values that
+// contain non-comparable fields are not comparable in Go, and
+// calling Zero on them is a compile error — that's the same
+// restriction the `comparable` constraint imposes on callers.
+func Zero[T comparable](v T) bool {
+	var zero T
+	return v == zero
+}
 
-// NonZero reports whether v is not zero.
-func NonZero[T Numeric](v T) bool { return v != 0 }
+// NonZero reports whether v is not equal to its type's zero value.
+// See Zero for the set of accepted types.
+func NonZero[T comparable](v T) bool {
+	var zero T
+	return v != zero
+}
 
 // Even reports whether v is divisible by two.
 func Even[T Integer](v T) bool { return v%2 == 0 }
@@ -52,11 +66,33 @@ func Even[T Integer](v T) bool { return v%2 == 0 }
 // Odd reports whether v is not divisible by two.
 func Odd[T Integer](v T) bool { return v%2 != 0 }
 
-// NonEmpty reports whether s has at least one byte.
+// NonEmpty reports whether s has at least one byte. Go's generics
+// cannot express a single "supports len()" constraint across
+// string, slice, map, and chan — slice / map types use a differently
+// structured type-union that no constraint can enumerate — so the
+// string variant keeps its simple signature and dedicated
+// NonEmptySlice / NonEmptyMap predicates cover the parameterised
+// container kinds.
 func NonEmpty(s string) bool { return len(s) > 0 }
 
 // Empty reports whether s is the empty string.
 func Empty(s string) bool { return len(s) == 0 }
+
+// NonEmptySlice reports whether s contains at least one element.
+// A nil slice has length zero, so NonEmptySlice(nil) is false.
+func NonEmptySlice[T any](s []T) bool { return len(s) > 0 }
+
+// EmptySlice reports whether s contains no elements — including the
+// nil slice, whose length is zero.
+func EmptySlice[T any](s []T) bool { return len(s) == 0 }
+
+// NonEmptyMap reports whether m has at least one key/value pair.
+// A nil map has length zero, so NonEmptyMap(nil) is false.
+func NonEmptyMap[K comparable, V any](m map[K]V) bool { return len(m) > 0 }
+
+// EmptyMap reports whether m has no key/value pairs — including the
+// nil map, whose length is zero.
+func EmptyMap[K comparable, V any](m map[K]V) bool { return len(m) == 0 }
 
 // NonNil reports whether p is not nil.
 func NonNil[T any](p *T) bool { return p != nil }

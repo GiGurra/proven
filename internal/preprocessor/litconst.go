@@ -76,9 +76,9 @@ func evalLibraryPredicate(p Predicate, arg ast.Expr) EvalResult {
 	case "NonPositive":
 		return evalNumeric(arg, cmpNonPositive)
 	case "Zero":
-		return evalNumeric(arg, cmpZero)
+		return evalZeroValue(arg, true)
 	case "NonZero":
-		return evalNumeric(arg, cmpNonZero)
+		return evalZeroValue(arg, false)
 	case "Even":
 		return evalInteger(arg, cmpEven)
 	case "Odd":
@@ -104,11 +104,75 @@ func cmpNonNegative() (intCmp, floatCmp) {
 func cmpNonPositive() (intCmp, floatCmp) {
 	return func(n int64) bool { return n <= 0 }, func(f float64) bool { return f <= 0 }
 }
-func cmpZero() (intCmp, floatCmp) {
-	return func(n int64) bool { return n == 0 }, func(f float64) bool { return f == 0 }
-}
-func cmpNonZero() (intCmp, floatCmp) {
-	return func(n int64) bool { return n != 0 }, func(f float64) bool { return f != 0 }
+// evalZeroValue is the type-generic evaluator for proven.Zero /
+// proven.NonZero, which are constrained to any `comparable` T in
+// the runtime API. wantZero == true checks for the type's zero
+// value; wantZero == false checks for anything else. Recognized
+// literal / constant shapes:
+//
+//   - numeric literals (int / float, with optional unary minus) —
+//     zero iff the numeric value is 0
+//   - string literal — zero iff the unquoted string is empty
+//   - `true` / `false` identifiers — zero iff false (Go's bool
+//     zero value)
+//   - `nil` identifier — zero for every nilable kind (pointer,
+//     interface, chan, func, map, slice)
+//   - `&X{...}`, `new(T)`, `make(...)` — known non-zero pointer /
+//     map / slice / chan, same shapes evalPointerIsNil recognizes
+//
+// Any other shape is EvalSkip and the caller falls back to normal
+// discharge.
+func evalZeroValue(arg ast.Expr, wantZero bool) EvalResult {
+	hold := func(isZero bool) EvalResult {
+		if isZero == wantZero {
+			return EvalHolds
+		}
+		return EvalFails
+	}
+	// Numeric literals (takes precedence over identifiers since
+	// signed numeric literals come through as UnaryExpr).
+	if i, ok := asIntLit(arg); ok {
+		return hold(i == 0)
+	}
+	if f, ok := asFloatLit(arg); ok {
+		return hold(f == 0)
+	}
+	// BasicLit string: zero iff empty after unquoting.
+	if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+		s, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return EvalSkip
+		}
+		return hold(len(s) == 0)
+	}
+	// `true` / `false` / `nil` identifier literals.
+	if id, ok := arg.(*ast.Ident); ok {
+		switch id.Name {
+		case "false":
+			return hold(true)
+		case "true":
+			return hold(false)
+		case "nil":
+			return hold(true)
+		}
+	}
+	// `&X{...}`, `new(T)`, `make(...)` produce non-nil pointers,
+	// maps, slices, or channels — never the zero value of a
+	// nilable kind.
+	if u, ok := arg.(*ast.UnaryExpr); ok && u.Op == token.AND {
+		if _, ok := u.X.(*ast.CompositeLit); ok {
+			return hold(false)
+		}
+	}
+	if call, ok := arg.(*ast.CallExpr); ok {
+		if id, ok := call.Fun.(*ast.Ident); ok {
+			switch id.Name {
+			case "new", "make":
+				return hold(false)
+			}
+		}
+	}
+	return EvalSkip
 }
 
 // evalNumeric parses a numeric literal (int / float / signed int /

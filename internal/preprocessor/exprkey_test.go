@@ -42,12 +42,12 @@ func TestExprKey_TrackedShapes(t *testing.T) {
 
 // TestExprKey_UntrackedShapes covers shapes the analyzer explicitly
 // refuses to key — it declines with (_, false) so no fact identity
-// is ever established on them.
+// is ever established on them. Predeclared constant identifiers
+// (nil, true, false, iota) are included because they carry a value
+// but no name a fact can be established against; rejecting them
+// here lets the literal evaluator in bindArgForCheck pick those
+// shapes up instead of short-circuiting into exprKey.
 func TestExprKey_UntrackedShapes(t *testing.T) {
-	// "nil" is an Ident so exprKey returns ("nil", true). The
-	// analyzer's nil-specific handling filters it where it matters
-	// (nilCompareVar rejects a "nil" subject). We focus this test
-	// on shapes that do NOT canonicalize.
 	cases := []string{
 		"_",
 		"x[i]",
@@ -56,6 +56,10 @@ func TestExprKey_UntrackedShapes(t *testing.T) {
 		"x.F()",
 		"x + 1",
 		"&x",
+		"nil",
+		"true",
+		"false",
+		"iota",
 	}
 	for _, src := range cases {
 		t.Run(src, func(t *testing.T) {
