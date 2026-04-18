@@ -50,17 +50,17 @@ func WithChecks(fn func()) {
 	fn()
 }
 
-// FailsWith asserts that running fn under WithChecks causes the given
+// AssertFails asserts that running fn under WithChecks causes the given
 // predicate to fire — i.e. that the enclosing proven.That or
 // proven.Returns call is wired to pred. If fn does not panic, or if a
 // different predicate fires, the test fails.
 //
 // Usage:
 //
-//	proventest.FailsWith(t, isPositive, func() {
+//	proventest.AssertFails(t, isPositive, func() {
 //	    Transfer(-5, "hi", "USD")
 //	})
-func FailsWith[T any](t *testing.T, pred func(T) bool, fn func()) {
+func AssertFails[T any](t *testing.T, pred func(T) bool, fn func()) {
 	t.Helper()
 	v := capture(t, fn)
 	if reflect.ValueOf(pred).Pointer() != reflect.ValueOf(v.Predicate).Pointer() {
@@ -72,10 +72,10 @@ func FailsWith[T any](t *testing.T, pred func(T) bool, fn func()) {
 	}
 }
 
-// Fails asserts that running fn under WithChecks causes some proven
-// predicate to fire. Returns the violation for further inspection.
-// Use when the exact predicate does not matter.
-func Fails(t *testing.T, fn func()) proven.Violation {
+// AssertAnyFailure asserts that running fn under WithChecks causes
+// some proven predicate to fire. Returns the violation for further
+// inspection. Use when the exact predicate does not matter.
+func AssertAnyFailure(t *testing.T, fn func()) proven.Violation {
 	t.Helper()
 	return capture(t, fn)
 }

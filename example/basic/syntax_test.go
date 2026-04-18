@@ -75,24 +75,24 @@ func TestEarlyReturnGuards(t *testing.T) {
 // runtime so a failing predicate panics.
 
 // 6. Wiring verification: Transfer's amount precondition is isPositive.
-// FailsWith runs the body under WithChecks and asserts that the named
+// AssertFails runs the body under WithChecks and asserts that the named
 // predicate is the one that fires.
 func TestWiring_TransferAmountIsPositive(t *testing.T) {
-	proventest.FailsWith(t, isPositive, func() {
+	proventest.AssertFails(t, isPositive, func() {
 		_ = Transfer(-5, "hi", "USD")
 	})
 }
 
 // 7. Wiring verification: Transfer's note precondition includes isNonEmpty.
 func TestWiring_TransferNoteIsNonEmpty(t *testing.T) {
-	proventest.FailsWith(t, isNonEmpty, func() {
+	proventest.AssertFails(t, isNonEmpty, func() {
 		_ = Transfer(10, "", "USD")
 	})
 }
 
 // 8. Wiring verification: Returns postcondition on FindUserID is isPositive.
 func TestWiring_ReturnsPostconditionIsPositive(t *testing.T) {
-	proventest.FailsWith(t, isPositive, func() {
+	proventest.AssertFails(t, isPositive, func() {
 		_ = proven.Returns(-1, isPositive)
 	})
 }
