@@ -42,7 +42,12 @@ func Run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	toolPath, toolArgs := args[0], args[1:]
+	_, chain, toolPath, toolArgs, ok := parseChain(args)
+	if !ok {
+		_, _ = fmt.Fprintln(stderr, "proven: --and-then present but no Go tool found in remaining args")
+		return 1
+	}
+
 	plan, err := planCompile(toolPath, toolArgs)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "proven: %v\n", err)
@@ -61,7 +66,18 @@ func Run(args []string, stderr io.Writer) int {
 		toolArgs = plan.NewArgs
 	}
 
-	cmd := exec.Command(toolPath, toolArgs...)
+	// Chain-aware exec: when --and-then was used, invoke the successor
+	// with the Go tool (and possibly-rewritten args) appended, so the
+	// chain threads through each preprocessor in order before reaching
+	// the real tool. Stdio and env are forwarded intact in both paths.
+	execName, execArgs := toolPath, toolArgs
+	if len(chain.NextCmd) > 0 {
+		execName = chain.NextCmd[0]
+		execArgs = append(append([]string(nil), chain.NextCmd[1:]...), toolPath)
+		execArgs = append(execArgs, toolArgs...)
+	}
+
+	cmd := exec.Command(execName, execArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = stderr
@@ -69,7 +85,7 @@ func Run(args []string, stderr io.Writer) int {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return exitErr.ExitCode()
 		}
-		_, _ = fmt.Fprintf(stderr, "proven: failed to run %s: %v\n", toolPath, err)
+		_, _ = fmt.Fprintf(stderr, "proven: failed to run %s: %v\n", execName, err)
 		return 1
 	}
 	return 0
