@@ -60,16 +60,65 @@ func target(x int) {
 	if strings.Contains(s, "proven.That") {
 		t.Errorf("proven.That still present after rewrite:\n%s", s)
 	}
-	// All bytes up to and including the original source are
-	// untouched; the preserved prefix matches the input's
-	// non-proven-call regions 1:1. A sentinel reference is
-	// appended afterwards, so overall line count grows by exactly
-	// one line.
-	if got, want := strings.Count(s, "\n"), strings.Count(src, "\n")+1; got != want {
-		t.Errorf("line count: got %d, want %d (original + 1 sentinel)", got, want)
+	// The rewritten file is: a file-level `//line <path>:1`
+	// directive (so DWARF records the user's source path), the
+	// length-preserved original content, and an appended sentinel
+	// reference. Line count grows by exactly two lines.
+	if got, want := strings.Count(s, "\n"), strings.Count(src, "\n")+2; got != want {
+		t.Errorf("line count: got %d, want %d (original + //line prefix + sentinel)", got, want)
+	}
+	if !strings.HasPrefix(s, "//line ") {
+		t.Errorf("missing file-level //line prefix:\n%s", s)
 	}
 	if !parsesCleanly(t, out) {
 		t.Errorf("rewritten source does not parse:\n%s", s)
+	}
+}
+
+func TestRewrite_EmitsLineDirective(t *testing.T) {
+	// The rewritten file must start with a file-level //line
+	// directive whose filename is the absolute path of the user's
+	// source. Without this, DWARF records the preprocessor's
+	// tempdir and IDE breakpoints don't match.
+	src := `package ex
+
+import "github.com/GiGurra/proven/pkg/proven"
+
+func isPositive(x int) bool { return x > 0 }
+
+func target(x int) {
+	proven.That(x, isPositive)
+}
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "in.go")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	imp := collectImports(f)
+	out, _, err := rewriteSource(path, f, fset, imp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	absPath, _ := filepath.Abs(path)
+	wantPrefix := "//line " + absPath + ":1\n"
+	if !strings.HasPrefix(string(out), wantPrefix) {
+		firstLine := string(out)
+		if i := strings.IndexByte(firstLine, '\n'); i >= 0 {
+			firstLine = firstLine[:i]
+		}
+		t.Errorf("missing or wrong //line prefix.\nwant: %q\ngot:  %q", wantPrefix, firstLine)
+	}
+
+	// The directive must not break parseability.
+	if !parsesCleanly(t, out) {
+		t.Errorf("rewritten output does not parse:\n%s", out)
 	}
 }
 
@@ -101,13 +150,18 @@ func source() int {
 }
 
 func TestRewrite_PositionsPreserved(t *testing.T) {
-	// All bytes in the original source region must stay at the
-	// same offset after rewriting, so cmd/compile's error
-	// messages point at the user's original line:col. The only
-	// permitted change is an appended sentinel on a fresh line
-	// at the end. Confirm by comparing the output's prefix of
-	// len(src) bytes against the input — the prefix must match
-	// except at the erased call spans, where it now has spaces.
+	// Inside the original-source region, all bytes must stay at
+	// the same offset after rewriting, so cmd/compile's error
+	// messages (under the //line directive) point at the user's
+	// original line:col. The only permitted changes are:
+	//   - A `//line <path>:1\n` directive prepended to the file,
+	//     which rebases the compiler's view of line 1 onto the
+	//     original source path; the directive itself is one
+	//     physical line the compiler effectively skips.
+	//   - An appended sentinel on a fresh line at the end.
+	// Confirm by stripping the prefix, then comparing
+	// len(src) bytes against the input — those must match except
+	// at the erased call spans, where it now has spaces.
 	src := `package ex
 
 import "github.com/GiGurra/proven/pkg/proven"
@@ -120,10 +174,17 @@ func f(x int) int {
 }
 `
 	out, _ := rewriteString(t, src)
-	if len(out) < len(src) {
-		t.Fatalf("output shorter than input: %d < %d", len(out), len(src))
+	// Skip the file-level //line directive line.
+	nlIdx := strings.IndexByte(string(out), '\n')
+	if nlIdx < 0 || !strings.HasPrefix(string(out), "//line ") {
+		t.Fatalf("expected rewritten output to start with a //line directive; got:\n%s", out)
 	}
-	prefix := string(out[:len(src)])
+	body := out[nlIdx+1:]
+
+	if len(body) < len(src) {
+		t.Fatalf("output body shorter than input: %d < %d", len(body), len(src))
+	}
+	prefix := string(body[:len(src)])
 	// Line boundaries must be byte-for-byte identical to the
 	// original — the rewrite only blanks non-newline bytes.
 	for i := 0; i < len(src); i++ {

@@ -40,6 +40,7 @@ import (
 	"go/ast"
 	"go/token"
 	"os"
+	"path/filepath"
 )
 
 // rewriteSource reads the bytes of path, erases every discharged
@@ -95,6 +96,24 @@ func rewriteSource(path string, f *ast.File, fset *token.FileSet, imp *importInf
 	for _, alias := range sortedAliasKeys(usedAliases) {
 		raw = appendImportSentinel(raw, alias+"."+usedAliases[alias])
 	}
+
+	// Prepend a file-level `//line <user-path>:1` directive so DWARF
+	// and compile/vet diagnostics record the user's original source
+	// path, not the preprocessor's tempdir. Without this, IDE
+	// breakpoints set against the user's file don't match the
+	// binary's debug info and never fire. Proven's rewrites are
+	// already length-preserving, so a single file-level directive is
+	// sufficient — no per-edit resets are needed. The absolute path
+	// is what debuggers and go tooling expect; we fall back to the
+	// original (typically already absolute from the compile argv) if
+	// filepath.Abs errors.
+	absPath, absErr := filepath.Abs(path)
+	if absErr != nil {
+		absPath = path
+	}
+	prefix := []byte("//line " + absPath + ":1\n")
+	raw = append(prefix, raw...)
+
 	return raw, true, nil
 }
 
